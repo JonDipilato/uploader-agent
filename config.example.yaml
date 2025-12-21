@@ -1,0 +1,95 @@
+project:
+  name: "daily_chill_mix"
+  output_dir: "runs"
+
+audio:
+  drive_folder_id: "YOUR_DRIVE_FOLDER_ID"
+  ordering: "name"
+  target_hours_min: 8
+  target_hours_max: 9
+  concat_codec: "libmp3lame"
+  concat_quality: 2
+  concat_bitrate: null
+
+drive:
+  use_service_account: true
+  service_account_json: "secrets/drive_service_account.json"
+  oauth_client_json: "secrets/drive_oauth_client.json"
+  token_json: "secrets/drive_token.json"
+
+visuals:
+  image_prompt: "cozy fireplace on a rainy night, warm glow, cinematic, high detail"
+  video_prompt: "subtle fire animation, gentle embers drifting, loopable, 5s"
+  loop_duration_seconds: 5
+  fps: 30
+  image_path: null
+  loop_video_path: null
+  whisk_mode: "command"
+  whisk_command:
+    - whisk
+    - "image"
+    - "--prompt"
+    - "{prompt}"
+    - "--out"
+    - "{output_path}"
+  whisk_api_key_env: "WHISK_API_KEY"
+  whisk_model: null
+  grok_mode: "command"
+  grok_command:
+    - grok
+    - "video"
+    - "--image"
+    - "{image_path}"
+    - "--prompt"
+    - "{prompt}"
+    - "--duration"
+    - "{duration}"
+    - "--fps"
+    - "{fps}"
+    - "--out"
+    - "{output_path}"
+  grok_api_key_env: "GROK_API_KEY"
+  grok_model: null
+
+text_overlay:
+  text: null
+  fontfile: null
+  font: null
+  font_size: 96
+  font_color: "white"
+  outline_color: "black"
+  outline_width: 4
+  box_color: null
+  box_borderw: null
+  shadow_color: null
+  shadow_x: null
+  shadow_y: null
+  x: "(w-text_w)/2"
+  y: "(h-text_h)/2"
+  apply_to_video: true
+  create_thumbnail: true
+  upload_thumbnail: false
+
+video:
+  resolution: "1920x1080"
+  fps: 30
+  video_bitrate: "4500k"
+  audio_bitrate: "192k"
+
+upload:
+  enabled: true
+  provider: "youtube"
+  credentials_json: "secrets/youtube_client.json"
+  token_json: "secrets/youtube_token.json"
+  privacy_status: "public"
+  category_id: "10"
+  title_template: "Daily Chill Mix - {date}"
+  description_template: "Longform ambient mix. Generated daily."
+  tags:
+    - "ambient"
+    - "chill"
+    - "fireplace"
+
+schedule:
+  enabled: true
+  daily_time: "03:00"
