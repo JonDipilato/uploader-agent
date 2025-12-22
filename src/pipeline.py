@@ -13,6 +13,8 @@ from .providers.youtube_uploader import YouTubeConfig, YouTubeUploader
 from .utils.ffmpeg import (
     build_drawtext_filter,
     concat_audio,
+    generate_color_image,
+    generate_loop_video_from_image,
     probe_duration_seconds,
     render_image_with_text,
     render_video,
@@ -35,21 +37,28 @@ class VideoCreatorAgent:
     def __init__(self, config: dict) -> None:
         self.config = config
 
-    def run_once(self) -> RunArtifacts:
+    def run_once(self, test_minutes: float | None = None, test_mode: bool = False) -> RunArtifacts:
         run_dir = self._create_run_dir()
         audio_dir = run_dir / "audio"
         audio_dir.mkdir(parents=True, exist_ok=True)
 
-        drive_cfg = self._build_drive_config()
-        drive_client = DriveClient(drive_cfg)
-        audio_files = drive_client.list_mp3_files(
-            ordering=self._cfg("audio", "ordering", default="name")
+        test_cfg = self.config.get("test", {})
+        test_enabled = test_mode or bool(test_cfg.get("enabled")) or test_minutes is not None
+        if test_minutes is None and test_enabled:
+            test_minutes = test_cfg.get("max_minutes")
+        repeat_playlist = (
+            test_cfg.get("repeat_playlist", False)
+            if test_enabled
+            else self._cfg("audio", "repeat_playlist", default=True)
         )
-        if not audio_files:
-            raise RuntimeError("No MP3 files found in the Drive folder")
-        downloaded = drive_client.download_many(audio_files, audio_dir)
+        disable_upload = test_cfg.get("disable_upload", True) if test_enabled else False
 
-        playlist, total_seconds = self._build_playlist(downloaded)
+        audio_files = self._collect_audio_files(audio_dir)
+        if not audio_files:
+            raise RuntimeError("No MP3 files found for the selected audio source")
+
+        target_min = self._target_min_seconds() if repeat_playlist else 0.0
+        playlist, total_seconds = self._build_playlist(audio_files, target_min)
         concat_list_path = run_dir / "concat.txt"
         write_concat_list(playlist, concat_list_path)
 
@@ -64,6 +73,11 @@ class VideoCreatorAgent:
         total_seconds = probe_duration_seconds(audio_path)
 
         max_seconds = self._target_max_seconds()
+        if test_enabled:
+            if test_minutes:
+                max_seconds = float(test_minutes) * 60.0
+            elif not repeat_playlist:
+                max_seconds = None
         if max_seconds and total_seconds > max_seconds:
             trimmed_audio = run_dir / "audio_trimmed.mp3"
             trim_audio(
@@ -116,7 +130,7 @@ class VideoCreatorAgent:
             drawtext_filter=drawtext_filter if overlay and overlay["apply_to_video"] else None,
         )
 
-        if self._cfg("upload", "enabled", default=True):
+        if self._cfg("upload", "enabled", default=True) and not disable_upload:
             uploader = self._build_uploader()
             title = self._render_template(self._cfg("upload", "title_template", default=""))
             description = self._render_template(
@@ -158,6 +172,24 @@ class VideoCreatorAgent:
         run_dir.mkdir(parents=True, exist_ok=True)
         return run_dir
 
+    def _collect_audio_files(self, audio_dir: Path) -> list[Path]:
+        source = self._cfg("audio", "source", default="drive")
+        ordering = self._cfg("audio", "ordering", default="name")
+        if source == "local":
+            folder = Path(self._cfg("audio", "local_folder", required=True))
+            files = self._list_local_audio_files(folder, ordering)
+            return [path.resolve() for path in files]
+        if source != "drive":
+            raise ValueError(f"Unsupported audio source: {source}")
+
+        drive_cfg = self._build_drive_config()
+        drive_client = DriveClient(drive_cfg)
+        audio_files = drive_client.list_mp3_files(ordering=ordering)
+        if not audio_files:
+            return []
+        downloaded = drive_client.download_many(audio_files, audio_dir)
+        return [path.resolve() for path in downloaded]
+
     def _build_drive_config(self) -> DriveConfig:
         folder_id = self._cfg("audio", "drive_folder_id", required=True)
         return DriveConfig(
@@ -183,16 +215,27 @@ class VideoCreatorAgent:
             )
         )
 
-    def _build_playlist(self, downloaded: list[Path]) -> tuple[list[Path], float]:
-        durations = [probe_duration_seconds(path) for path in downloaded]
-        target_min = self._target_min_seconds()
+    def _list_local_audio_files(self, folder: Path, ordering: str) -> list[Path]:
+        if not folder.exists():
+            raise RuntimeError(f"Audio folder not found: {folder}")
+        recursive = bool(self._cfg("audio", "recursive", default=False))
+        candidates = folder.rglob("*") if recursive else folder.iterdir()
+        files = [path for path in candidates if path.is_file() and path.suffix.lower() == ".mp3"]
+        if ordering == "modifiedTime":
+            files.sort(key=lambda path: path.stat().st_mtime)
+        else:
+            files.sort(key=lambda path: path.name.lower())
+        return files
+
+    def _build_playlist(self, files: list[Path], target_min: float) -> tuple[list[Path], float]:
+        durations = [probe_duration_seconds(path) for path in files]
         if target_min <= 0:
-            return downloaded, sum(durations)
+            return files, sum(durations)
         playlist: list[Path] = []
         total = 0.0
         index = 0
         while total < target_min:
-            path = downloaded[index % len(downloaded)]
+            path = files[index % len(files)]
             duration = durations[index % len(durations)]
             playlist.append(path)
             total += duration
@@ -210,19 +253,31 @@ class VideoCreatorAgent:
         prompt = self._cfg("visuals", "image_prompt", default=None) or self._cfg(
             "visuals", "prompt", default=None
         )
-        if not prompt:
-            raise RuntimeError("visuals.image_prompt is required to generate an image")
-        output_path = run_dir / "visual.png"
-        whisk = WhiskClient(
-            WhiskConfig(
-                mode=self._cfg("visuals", "whisk_mode", default="command"),
-                command=self._cfg("visuals", "whisk_command", default=None),
-                api_key_env=self._cfg("visuals", "whisk_api_key_env", default=None),
-                model=self._cfg("visuals", "whisk_model", default=None),
+        if prompt:
+            output_path = run_dir / "visual.png"
+            whisk = WhiskClient(
+                WhiskConfig(
+                    mode=self._cfg("visuals", "whisk_mode", default="command"),
+                    command=self._cfg("visuals", "whisk_command", default=None),
+                    api_key_env=self._cfg("visuals", "whisk_api_key_env", default=None),
+                    model=self._cfg("visuals", "whisk_model", default=None),
+                )
             )
+            whisk.generate_image(prompt, output_path)
+            return output_path
+
+        if self._cfg("visuals", "auto_background", default=False):
+            output_path = run_dir / "visual.png"
+            generate_color_image(
+                output_path,
+                resolution=self._cfg("video", "resolution", default="1920x1080"),
+                color=self._cfg("visuals", "background_color", default="black"),
+            )
+            return output_path
+
+        raise RuntimeError(
+            "Provide visuals.image_path, visuals.image_prompt, or enable visuals.auto_background"
         )
-        whisk.generate_image(prompt, output_path)
-        return output_path
 
     def _ensure_loop_video(self, run_dir: Path, image_path: Path) -> Path:
         loop_path = self._cfg("visuals", "loop_video_path", default=None)
@@ -232,29 +287,49 @@ class VideoCreatorAgent:
                 raise RuntimeError(f"Loop video not found: {resolved}")
             return resolved
 
-        prompt = self._cfg("visuals", "video_prompt", default=None) or self._cfg(
-            "visuals", "prompt", default=None
-        )
-        if not prompt:
-            raise RuntimeError("visuals.video_prompt is required to generate loop video")
+        provider = self._cfg("visuals", "loop_provider", default=None)
+        if not provider:
+            provider = "grok" if self._cfg("visuals", "grok_command", default=None) else "ffmpeg"
+
         output_path = run_dir / "loop.mp4"
-        grok = GrokClient(
-            GrokConfig(
-                mode=self._cfg("visuals", "grok_mode", default="command"),
-                command=self._cfg("visuals", "grok_command", default=None),
-                api_key_env=self._cfg("visuals", "grok_api_key_env", default=None),
-                model=self._cfg("visuals", "grok_model", default=None),
+        duration_seconds = self._cfg("visuals", "loop_duration_seconds", default=5)
+        fps = self._cfg("visuals", "fps", default=None) or self._cfg("video", "fps", default=30)
+
+        if provider == "grok":
+            prompt = self._cfg("visuals", "video_prompt", default=None) or self._cfg(
+                "visuals", "prompt", default=None
             )
-        )
-        grok.generate_loop_video(
-            image_path=image_path,
-            output_path=output_path,
-            prompt=prompt,
-            duration_seconds=self._cfg("visuals", "loop_duration_seconds", default=5),
-            fps=self._cfg("visuals", "fps", default=None)
-            or self._cfg("video", "fps", default=30),
-        )
-        return output_path
+            if not prompt:
+                raise RuntimeError("visuals.video_prompt is required to generate loop video")
+            grok = GrokClient(
+                GrokConfig(
+                    mode=self._cfg("visuals", "grok_mode", default="command"),
+                    command=self._cfg("visuals", "grok_command", default=None),
+                    api_key_env=self._cfg("visuals", "grok_api_key_env", default=None),
+                    model=self._cfg("visuals", "grok_model", default=None),
+                )
+            )
+            grok.generate_loop_video(
+                image_path=image_path,
+                output_path=output_path,
+                prompt=prompt,
+                duration_seconds=duration_seconds,
+                fps=fps,
+            )
+            return output_path
+
+        if provider == "ffmpeg":
+            generate_loop_video_from_image(
+                image_path=image_path,
+                output_path=output_path,
+                duration_seconds=duration_seconds,
+                fps=fps,
+                resolution=self._cfg("video", "resolution", default="1920x1080"),
+                zoom_amount=self._cfg("visuals", "loop_zoom_amount", default=0.02),
+            )
+            return output_path
+
+        raise ValueError(f"Unsupported loop provider: {provider}")
 
     def _target_min_seconds(self) -> float:
         min_hours = self._cfg("audio", "target_hours_min", default=8)

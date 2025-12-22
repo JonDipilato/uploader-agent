@@ -43,6 +43,15 @@ def prompt_int(text: str, default: int) -> int:
             print("Enter a whole number.")
 
 
+def prompt_float(text: str, default: float) -> float:
+    while True:
+        value = prompt(text, str(default))
+        try:
+            return float(value)
+        except ValueError:
+            print("Enter a number.")
+
+
 def prompt_path(text: str, default: str | None = None) -> str:
     return prompt(text, default=default, required=False)
 
@@ -95,48 +104,68 @@ def main() -> None:
     print("Press Enter to accept defaults.")
 
     project_name = prompt("Project name", "daily_chill_mix")
-    drive_folder_id = prompt("Google Drive folder ID (MP3s)", required=True)
+    audio_source = prompt("Audio source (local/drive)", "local").strip().lower()
+    if audio_source not in {"local", "drive"}:
+        audio_source = "local"
+    local_folder = ""
+    drive_folder_id = ""
+    if audio_source == "local":
+        local_folder = prompt("Local folder path (MP3s)", "C:\\Users\\USERNAME\\Music")
+    else:
+        drive_folder_id = prompt("Google Drive folder ID (MP3s)", required=True)
+    repeat_playlist = prompt_bool("Repeat playlist to reach target hours?", default=True)
+    recursive = prompt_bool("Scan subfolders for MP3s?", default=False)
     target_min_hours = prompt_int("Target hours minimum", 8)
     target_max_hours = prompt_int("Target hours maximum", 9)
 
-    use_service_account = prompt_bool("Use Drive service account?", default=True)
-    service_account_path = ""
-    oauth_client_path = ""
-    drive_token_path = ""
-    if use_service_account:
-        service_account_path = prompt_path(
-            "Path to Drive service account JSON",
-            "secrets/drive_service_account.json",
-        )
-        sa_src = normalize_path(service_account_path)
-        sa_dest = ROOT / "secrets" / "drive_service_account.json"
-        service_account_path = path_for_config(maybe_copy_file("Drive service account", sa_src, sa_dest))
-        oauth_client_path = "secrets/drive_oauth_client.json"
-        drive_token_path = "secrets/drive_token.json"
-    else:
-        oauth_client_path = prompt_path(
-            "Path to Drive OAuth client JSON",
-            "secrets/drive_oauth_client.json",
-        )
-        oauth_src = normalize_path(oauth_client_path)
-        oauth_dest = ROOT / "secrets" / "drive_oauth_client.json"
-        oauth_client_path = path_for_config(maybe_copy_file("Drive OAuth client", oauth_src, oauth_dest))
-        drive_token_path = prompt_path(
-            "Path to Drive OAuth token JSON (will be created)",
-            "secrets/drive_token.json",
-        )
+    use_service_account = True
+    service_account_path = "secrets/drive_service_account.json"
+    oauth_client_path = "secrets/drive_oauth_client.json"
+    drive_token_path = "secrets/drive_token.json"
+    if audio_source == "drive":
+        use_service_account = prompt_bool("Use Drive service account?", default=True)
+        if use_service_account:
+            service_account_path = prompt_path(
+                "Path to Drive service account JSON",
+                "secrets/drive_service_account.json",
+            )
+            sa_src = normalize_path(service_account_path)
+            sa_dest = ROOT / "secrets" / "drive_service_account.json"
+            service_account_path = path_for_config(
+                maybe_copy_file("Drive service account", sa_src, sa_dest)
+            )
+        else:
+            oauth_client_path = prompt_path(
+                "Path to Drive OAuth client JSON",
+                "secrets/drive_oauth_client.json",
+            )
+            oauth_src = normalize_path(oauth_client_path)
+            oauth_dest = ROOT / "secrets" / "drive_oauth_client.json"
+            oauth_client_path = path_for_config(
+                maybe_copy_file("Drive OAuth client", oauth_src, oauth_dest)
+            )
+            drive_token_path = prompt_path(
+                "Path to Drive OAuth token JSON (will be created)",
+                "secrets/drive_token.json",
+            )
 
     image_path = prompt_path("Existing image path (leave blank to generate)", "")
     image_prompt = ""
+    auto_background = False
     if not image_path:
+        auto_background = prompt_bool("Auto-generate background (no Whisk)?", default=False)
+    if not image_path and not auto_background:
         image_prompt = prompt(
             "Whisk image prompt",
             "cozy fireplace on a rainy night, warm glow, cinematic, high detail",
         )
 
     loop_video_path = prompt_path("Existing loop video path (leave blank to generate)", "")
+    loop_provider = prompt("Loop generator (ffmpeg/grok)", "ffmpeg").strip().lower()
+    if loop_provider not in {"ffmpeg", "grok"}:
+        loop_provider = "ffmpeg"
     video_prompt = ""
-    if not loop_video_path:
+    if not loop_video_path and loop_provider == "grok":
         video_prompt = prompt(
             "Grok video prompt",
             "subtle fire animation, gentle embers drifting, loopable, 5s",
@@ -144,6 +173,9 @@ def main() -> None:
 
     loop_duration = prompt_int("Loop duration seconds", 5)
     fps = prompt_int("FPS", 30)
+    loop_zoom_amount = 0.02
+    if loop_provider == "ffmpeg":
+        loop_zoom_amount = prompt_float("Loop zoom amount (subtle motion)", 0.02)
 
     overlay_text = prompt("Overlay text (blank for none)", "")
     overlay_apply_to_video = True
@@ -203,6 +235,9 @@ def main() -> None:
 
     daily_time = prompt("Daily publish time (HH:MM, 24h)", "03:00")
 
+    test_enabled = prompt_bool("Enable test mode (no upload, no repeat)?", default=False)
+    test_max_minutes = prompt_int("Test max minutes (0 = full length)", 0)
+
     whisk_command = [
         "whisk",
         "image",
@@ -231,8 +266,12 @@ def main() -> None:
   output_dir: "runs"
 
 audio:
+  source: {yaml_quote(audio_source)}
   drive_folder_id: {yaml_quote(drive_folder_id)}
+  local_folder: {yaml_quote(local_folder) if local_folder else "null"}
   ordering: "name"
+  repeat_playlist: {"true" if repeat_playlist else "false"}
+  recursive: {"true" if recursive else "false"}
   target_hours_min: {target_min_hours}
   target_hours_max: {target_max_hours}
   concat_codec: "libmp3lame"
@@ -252,6 +291,10 @@ visuals:
   fps: {fps}
   image_path: {yaml_quote(path_for_config(normalize_path(image_path))) if image_path else "null"}
   loop_video_path: {yaml_quote(path_for_config(normalize_path(loop_video_path))) if loop_video_path else "null"}
+  loop_provider: {yaml_quote(loop_provider)}
+  loop_zoom_amount: {loop_zoom_amount}
+  auto_background: {"true" if auto_background else "false"}
+  background_color: "black"
   whisk_mode: "command"
   whisk_command:
 {yaml_list(whisk_command)}
@@ -303,6 +346,12 @@ upload:
 schedule:
   enabled: true
   daily_time: {yaml_quote(daily_time)}
+
+test:
+  enabled: {"true" if test_enabled else "false"}
+  max_minutes: {test_max_minutes if test_max_minutes else "null"}
+  disable_upload: true
+  repeat_playlist: false
 """
 
     config_path = ROOT / "config.yaml"

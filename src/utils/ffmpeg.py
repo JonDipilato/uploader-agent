@@ -49,7 +49,7 @@ def probe_duration_seconds(path: Path) -> float:
 def write_concat_list(files: Iterable[Path], list_path: Path) -> None:
     lines = []
     for file_path in files:
-        safe_path = str(file_path).replace("'", r"'\''")
+        safe_path = file_path.as_posix().replace("'", r"'\''")
         lines.append(f"file '{safe_path}'")
     list_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -171,6 +171,65 @@ def render_image_with_text(
     ]
     run_ffmpeg(args)
 
+
+def generate_loop_video_from_image(
+    image_path: Path,
+    output_path: Path,
+    duration_seconds: int = 5,
+    fps: int = 30,
+    resolution: str = "1920x1080",
+    zoom_amount: float = 0.02,
+) -> None:
+    frames = max(int(duration_seconds * fps), 1)
+    cycle = max(frames - 1, 1)
+    zoom_expr = f"1+{zoom_amount}*sin(2*PI*on/{cycle})"
+    filter_value = (
+        f"scale={resolution},"
+        "zoompan="
+        f"z='{zoom_expr}':"
+        "x='(iw-iw/zoom)/2':"
+        "y='(ih-ih/zoom)/2':"
+        "d=1:"
+        f"s={resolution}:"
+        f"fps={fps}"
+    )
+    args = [
+        "ffmpeg",
+        "-y",
+        "-loop",
+        "1",
+        "-i",
+        str(image_path),
+        "-t",
+        str(duration_seconds),
+        "-vf",
+        filter_value,
+        "-r",
+        str(fps),
+        "-pix_fmt",
+        "yuv420p",
+        str(output_path),
+    ]
+    run_ffmpeg(args)
+
+
+def generate_color_image(
+    output_path: Path,
+    resolution: str = "1920x1080",
+    color: str = "black",
+) -> None:
+    args = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        f"color=c={color}:s={resolution}",
+        "-frames:v",
+        "1",
+        str(output_path),
+    ]
+    run_ffmpeg(args)
 
 def render_video(
     loop_video_path: Path,

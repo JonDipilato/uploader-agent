@@ -18,10 +18,10 @@ def load_config(path: Path) -> dict:
     return data
 
 
-def run_once(config_path: Path) -> None:
+def run_once(config_path: Path, test_minutes: int | None = None, test_mode: bool = False) -> None:
     config = load_config(config_path)
     agent = VideoCreatorAgent(config)
-    agent.run_once()
+    agent.run_once(test_minutes=test_minutes, test_mode=test_mode)
 
 
 def run_scheduler(config_path: Path) -> None:
@@ -48,6 +48,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run the pipeline once and exit",
     )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Run in test mode (no upload, no repeat)",
+    )
+    parser.add_argument(
+        "--test-minutes",
+        type=int,
+        default=None,
+        help="Test mode duration in minutes (optional)",
+    )
     return parser.parse_args()
 
 
@@ -56,7 +67,7 @@ def main() -> None:
     config = load_config(args.config)
     schedule_enabled = config.get("schedule", {}).get("enabled", True)
     if args.once or not schedule_enabled:
-        run_once(args.config)
+        run_once(args.config, test_minutes=args.test_minutes, test_mode=args.test)
     else:
         run_scheduler(args.config)
 

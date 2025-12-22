@@ -3,8 +3,12 @@ project:
   output_dir: "runs"
 
 audio:
+  source: "drive"
   drive_folder_id: "YOUR_DRIVE_FOLDER_ID"
+  local_folder: null
   ordering: "name"
+  repeat_playlist: true
+  recursive: false
   target_hours_min: 8
   target_hours_max: 9
   concat_codec: "libmp3lame"
@@ -24,6 +28,10 @@ visuals:
   fps: 30
   image_path: null
   loop_video_path: null
+  loop_provider: "ffmpeg"
+  loop_zoom_amount: 0.02
+  auto_background: false
+  background_color: "black"
   whisk_mode: "command"
   whisk_command:
     - whisk
@@ -69,6 +77,12 @@ text_overlay:
   apply_to_video: true
   create_thumbnail: true
   upload_thumbnail: false
+
+test:
+  enabled: false
+  max_minutes: null
+  disable_upload: true
+  repeat_playlist: false
 
 video:
   resolution: "1920x1080"

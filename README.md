@@ -32,10 +32,12 @@ Automates an 8-9 hour looped visual + audio video:
    .\start-ui.ps1
    ```
 4. In the browser form:
-   - Paste your Google Drive folder ID.
+   - Choose audio source (Local folder or Google Drive).
+   - If Local folder: paste the MP3 folder path (example: `C:\Users\jon-d\Downloads\Music`).
+   - If Drive: paste your Google Drive folder ID.
    - Choose Drive auth (service account is easiest) and upload the JSON file.
    - Upload YouTube OAuth client JSON.
-   - Fill prompts, schedule time, and optional text overlay.
+   - Fill prompts, schedule time, optional text overlay, and loop generator (ffmpeg is simplest).
    - Click "Save config".
 5. Set API keys (same PowerShell window):
    ```powershell
@@ -46,14 +48,18 @@ Automates an 8-9 hour looped visual + audio video:
    ```powershell
    .\run-once.ps1
    ```
-7. Schedule daily (runs in background):
+7. Test run (no upload, no repeat):
+   ```powershell
+   .\run-test.ps1 -Minutes 10
+   ```
+8. Schedule daily (runs in background):
    ```powershell
    .\schedule-task.ps1
    ```
 
 ## Credentials checklist
 
-- Drive service account JSON (share the Drive folder with the service account email).
+- Drive service account JSON (only if using Google Drive; share the folder with the service account email).
 - Or Drive OAuth client JSON (if not using service account).
 - YouTube OAuth client JSON (first run opens a browser to authorize).
 - Whisk and Grok API keys (set in your environment).
@@ -126,6 +132,7 @@ visuals:
 ```
 
 If you already have assets, set `visuals.image_path` and/or `visuals.loop_video_path` to skip generation.
+If you want to avoid Grok entirely, set `visuals.loop_provider: ffmpeg` (default) to create a loop from the image.
 
 ## YouTube upload
 
@@ -137,6 +144,19 @@ If you already have assets, set `visuals.image_path` and/or `visuals.loop_video_
 ## Text overlay + thumbnails
 
 Set `text_overlay.text` to burn text onto the video and generate a matching thumbnail. If you want the thumbnail uploaded automatically, set `text_overlay.upload_thumbnail: true`. In the UI, use the "Text Overlay + Thumbnail" section.
+
+## Local audio (no Drive)
+
+Set `audio.source: local` and `audio.local_folder` to your MP3 folder path. The UI exposes this as "Audio source".
+YouTube APIs do not allow downloading music, so use local files or Drive instead.
+
+## Test mode
+
+Test mode disables uploads and playlist repetition. Run a quick test with:
+```powershell
+.\run-test.ps1 -Minutes 10
+```
+Set minutes to `0` to render the full length of the playlist once (no repeat).
 
 ## Run
 
@@ -172,6 +192,11 @@ Then run once:
 .\run-once.ps1
 ```
 
+Test run (no upload, no repeat):
+```powershell
+.\run-test.ps1 -Minutes 10
+```
+
 Or keep it running with the built-in scheduler:
 ```powershell
 .\run-schedule.ps1
@@ -193,4 +218,6 @@ To remove the scheduled task:
 - Visuals are looped continuously to match the audio length.
 - Optional text overlay can be burned into the video and thumbnail using `text_overlay` settings.
 - If you use text overlay, design the image prompt with empty space behind the text and provide a TTF/OTF font file.
+- If you select the ffmpeg loop generator, no Grok account is required.
+- If you enable `visuals.auto_background`, the agent will generate a plain background image with ffmpeg.
 - For production reliability, consider running the agent under systemd or a container with a watchdog.

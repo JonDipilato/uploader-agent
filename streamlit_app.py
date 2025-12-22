@@ -84,26 +84,49 @@ def main() -> None:
         )
 
         st.subheader("Audio")
-        drive_folder_id = st.text_input(
-            "Google Drive folder ID (MP3s)",
-            cfg(config, "audio", "drive_folder_id", ""),
+        audio_source_label = st.selectbox(
+            "Audio source",
+            ["Local folder", "Google Drive"],
+            index=0 if cfg(config, "audio", "source", "drive") == "local" else 1,
         )
+        st.caption("YouTube audio downloads are not supported. Use local files or Drive.")
+        audio_source = "local" if audio_source_label == "Local folder" else "drive"
+        drive_folder_id = cfg(config, "audio", "drive_folder_id", "")
+        local_folder = cfg(config, "audio", "local_folder", "")
+        recursive = bool(cfg(config, "audio", "recursive", False))
+        if audio_source == "local":
+            local_folder = st.text_input(
+                "Local folder path (MP3s)",
+                local_folder or "C:\\Users\\USERNAME\\Music",
+            )
+            recursive = st.checkbox("Scan subfolders", value=recursive)
+        else:
+            drive_folder_id = st.text_input(
+                "Google Drive folder ID (MP3s)",
+                drive_folder_id,
+            )
         ordering = st.selectbox(
             "Ordering",
             ["name", "modifiedTime"],
             index=0 if cfg(config, "audio", "ordering", "name") == "name" else 1,
+        )
+        repeat_playlist = st.checkbox(
+            "Repeat playlist to hit target hours",
+            value=bool(cfg(config, "audio", "repeat_playlist", True)),
         )
         target_hours_min = st.number_input(
             "Target hours minimum",
             min_value=0,
             max_value=24,
             value=int(cfg(config, "audio", "target_hours_min", 8)),
+            disabled=not repeat_playlist,
         )
         target_hours_max = st.number_input(
             "Target hours maximum",
             min_value=0,
             max_value=24,
             value=int(cfg(config, "audio", "target_hours_max", 9)),
+            disabled=not repeat_playlist,
         )
         concat_quality = st.number_input(
             "MP3 quality (0 best - 9 worst)",
@@ -116,37 +139,67 @@ def main() -> None:
             cfg(config, "audio", "concat_bitrate", "") or "",
         )
 
-        st.subheader("Drive")
-        use_service_account = st.checkbox(
-            "Use service account",
-            value=bool(cfg(config, "drive", "use_service_account", True)),
+        use_service_account = bool(cfg(config, "drive", "use_service_account", True))
+        service_account_path = cfg(
+            config,
+            "drive",
+            "service_account_json",
+            "secrets/drive_service_account.json",
         )
-        if use_service_account:
-            service_account_path = st.text_input(
-                "Service account JSON path",
-                cfg(config, "drive", "service_account_json", "secrets/drive_service_account.json"),
+        oauth_client_path = cfg(
+            config,
+            "drive",
+            "oauth_client_json",
+            "secrets/drive_oauth_client.json",
+        )
+        drive_token_path = cfg(
+            config,
+            "drive",
+            "token_json",
+            "secrets/drive_token.json",
+        )
+        upload_sa = None
+        upload_oauth = None
+        if audio_source == "drive":
+            st.subheader("Drive")
+            use_service_account = st.checkbox(
+                "Use service account",
+                value=use_service_account,
             )
-            upload_sa = st.file_uploader("Upload service account JSON", type=["json"])
-        else:
-            service_account_path = ""
-            upload_sa = None
-            oauth_client_path = st.text_input(
-                "Drive OAuth client JSON path",
-                cfg(config, "drive", "oauth_client_json", "secrets/drive_oauth_client.json"),
-            )
-            upload_oauth = st.file_uploader("Upload Drive OAuth client JSON", type=["json"])
-            drive_token_path = st.text_input(
-                "Drive token JSON path (created on first auth)",
-                cfg(config, "drive", "token_json", "secrets/drive_token.json"),
-            )
+            if use_service_account:
+                service_account_path = st.text_input(
+                    "Service account JSON path",
+                    service_account_path,
+                )
+                upload_sa = st.file_uploader("Upload service account JSON", type=["json"])
+            else:
+                oauth_client_path = st.text_input(
+                    "Drive OAuth client JSON path",
+                    oauth_client_path,
+                )
+                upload_oauth = st.file_uploader(
+                    "Upload Drive OAuth client JSON",
+                    type=["json"],
+                )
+                drive_token_path = st.text_input(
+                    "Drive token JSON path (created on first auth)",
+                    drive_token_path,
+                )
 
         st.subheader("Visuals")
+        auto_background = st.checkbox(
+            "Auto-generate background (no Whisk needed)",
+            value=bool(cfg(config, "visuals", "auto_background", False)),
+        )
+        background_color = cfg(config, "visuals", "background_color", "black")
+        if auto_background:
+            background_color = st.text_input("Background color", background_color)
         image_path = st.text_input(
             "Existing image path (leave blank to generate)",
             cfg(config, "visuals", "image_path", "") or "",
         )
         upload_image = st.file_uploader("Upload image (optional)", type=["png", "jpg", "jpeg"])
-        if not image_path:
+        if not image_path and not auto_background:
             image_prompt = st.text_input(
                 "Whisk image prompt",
                 cfg(
@@ -165,7 +218,13 @@ def main() -> None:
             cfg(config, "visuals", "loop_video_path", "") or "",
         )
         upload_loop = st.file_uploader("Upload loop video (optional)", type=["mp4", "mov"])
-        if not loop_video_path:
+        loop_provider = st.selectbox(
+            "Loop generator (if no loop video is provided)",
+            ["ffmpeg", "grok"],
+            index=0 if cfg(config, "visuals", "loop_provider", "ffmpeg") == "ffmpeg" else 1,
+        )
+        loop_zoom_amount = float(cfg(config, "visuals", "loop_zoom_amount", 0.02))
+        if not loop_video_path and loop_provider == "grok":
             video_prompt = st.text_input(
                 "Grok video prompt",
                 cfg(
@@ -177,6 +236,14 @@ def main() -> None:
             )
         else:
             video_prompt = cfg(config, "visuals", "video_prompt", "")
+        if loop_provider == "ffmpeg":
+            loop_zoom_amount = st.number_input(
+                "Loop zoom amount (subtle motion)",
+                min_value=0.0,
+                max_value=0.2,
+                value=float(loop_zoom_amount),
+                step=0.005,
+            )
 
         loop_duration = st.number_input(
             "Loop duration (seconds)",
@@ -315,6 +382,19 @@ def main() -> None:
             ", ".join(cfg(config, "upload", "tags", ["ambient", "chill", "fireplace"])),
         )
 
+        st.subheader("Test mode")
+        test_enabled = st.checkbox(
+            "Enable test mode (no upload, no repeat)",
+            value=bool(cfg(config, "test", "enabled", False)),
+        )
+        test_max_minutes_value = cfg(config, "test", "max_minutes", None) or 0
+        test_max_minutes = st.number_input(
+            "Max minutes (0 = full length)",
+            min_value=0,
+            max_value=720,
+            value=int(test_max_minutes_value),
+        )
+
         st.subheader("Schedule")
         schedule_enabled = st.checkbox(
             "Enable daily schedule",
@@ -427,8 +507,12 @@ def main() -> None:
                 "output_dir": output_dir,
             },
             "audio": {
+                "source": audio_source,
                 "drive_folder_id": drive_folder_id,
+                "local_folder": local_folder or None,
                 "ordering": ordering,
+                "repeat_playlist": repeat_playlist,
+                "recursive": recursive,
                 "target_hours_min": int(target_hours_min),
                 "target_hours_max": int(target_hours_max),
                 "concat_codec": "libmp3lame",
@@ -448,6 +532,10 @@ def main() -> None:
                 "fps": int(fps),
                 "image_path": saved_image_path or None,
                 "loop_video_path": saved_loop_path or None,
+                "loop_provider": loop_provider,
+                "loop_zoom_amount": float(loop_zoom_amount),
+                "auto_background": auto_background,
+                "background_color": background_color,
                 "whisk_mode": "command",
                 "whisk_command": parsed_whisk_command,
                 "whisk_api_key_env": cfg(config, "visuals", "whisk_api_key_env", "WHISK_API_KEY"),
@@ -493,6 +581,12 @@ def main() -> None:
                 "description_template": description_template,
                 "tags": split_tags(tags_text),
             },
+            "test": {
+                "enabled": test_enabled,
+                "max_minutes": int(test_max_minutes) if test_max_minutes else None,
+                "disable_upload": True,
+                "repeat_playlist": False,
+            },
             "schedule": {
                 "enabled": schedule_enabled,
                 "daily_time": daily_time,
@@ -510,6 +604,7 @@ def main() -> None:
     )
     st.code(
         ".\\run-once.ps1\n"
+        ".\\run-test.ps1 -Minutes 10\n"
         ".\\schedule-task.ps1\n"
         ".\\schedule-task.ps1 -Remove",
         language="powershell",
