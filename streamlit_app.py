@@ -23,8 +23,11 @@ SECRETS_DIR = ROOT / "secrets"
 ASSETS_DIR = ROOT / "assets"
 
 def get_app_password() -> str:
-    if "app_password" in st.secrets:
-        return str(st.secrets["app_password"]).strip()
+    try:
+        if "app_password" in st.secrets:
+            return str(st.secrets["app_password"]).strip()
+    except FileNotFoundError:
+        pass
     return os.getenv("APP_PASSWORD", "").strip()
 
 def require_password() -> bool:
