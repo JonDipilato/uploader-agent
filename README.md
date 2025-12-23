@@ -39,6 +39,7 @@ Automates an 8-9 hour looped visual + audio video:
    - Upload YouTube OAuth client JSON.
    - Fill prompts, schedule time, optional text overlay, and loop generator (ffmpeg is simplest).
    - Click "Save config".
+   - Or click "Run test now" / "Start full run" to execute from the UI.
 5. Set API keys (same PowerShell window):
    ```powershell
    $env:WHISK_API_KEY="YOUR_KEY"
@@ -273,6 +274,7 @@ To remove the scheduled task:
 - Visuals are looped continuously to match the audio length.
 - Optional text overlay can be burned into the video and thumbnail using `text_overlay` settings.
 - If you use text overlay, design the image prompt with empty space behind the text and provide a TTF/OTF font file.
+- UI run buttons execute on the local machine and write logs to `runs/_ui`.
 - If you select the ffmpeg loop generator, no Grok account is required.
 - If you enable `visuals.auto_background`, the agent will generate a plain background image with ffmpeg.
 - For more motion, increase `visuals.loop_pan_amount` and `visuals.loop_zoom_amount`.

@@ -4,6 +4,9 @@ import datetime as dt
 import hmac
 import random
 import os
+import signal
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +24,11 @@ CONFIG_PATH = ROOT / "config.yaml"
 EXAMPLE_CONFIG_PATH = ROOT / "config.example.yaml"
 SECRETS_DIR = ROOT / "secrets"
 ASSETS_DIR = ROOT / "assets"
+RUNS_UI_DIR = ROOT / "runs" / "_ui"
+SCHEDULE_PID_PATH = RUNS_UI_DIR / "scheduler.pid"
+SCHEDULE_LOG_PATH = RUNS_UI_DIR / "scheduler.log"
+FULLRUN_PID_PATH = RUNS_UI_DIR / "full_run.pid"
+FULLRUN_LOG_PATH = RUNS_UI_DIR / "full_run.log"
 
 def get_app_password() -> str:
     try:
@@ -30,6 +38,91 @@ def get_app_password() -> str:
         pass
     return os.getenv("APP_PASSWORD", "").strip()
 
+
+def ensure_runs_dir() -> None:
+    RUNS_UI_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def read_pid(pid_path: Path) -> int | None:
+    try:
+        return int(pid_path.read_text(encoding="utf-8").strip())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def is_pid_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def start_background(args: list[str], pid_path: Path, log_path: Path) -> int:
+    ensure_runs_dir()
+    existing_pid = read_pid(pid_path)
+    if existing_pid and is_pid_running(existing_pid):
+        return existing_pid
+
+    log_handle = log_path.open("a", encoding="utf-8")
+    kwargs: dict[str, Any] = {"stdout": log_handle, "stderr": log_handle}
+    if os.name == "nt":
+        kwargs["creationflags"] = (
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        )
+    else:
+        kwargs["start_new_session"] = True
+    process = subprocess.Popen(args, **kwargs)
+    log_handle.close()
+    pid_path.write_text(str(process.pid), encoding="utf-8")
+    return process.pid
+
+
+def stop_background(pid_path: Path) -> bool:
+    pid = read_pid(pid_path)
+    if not pid:
+        return False
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/F"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return False
+    try:
+        pid_path.unlink()
+    except FileNotFoundError:
+        pass
+    return True
+
+
+def run_agent_once_cli(
+    config_path: Path,
+    test_mode: bool = False,
+    test_minutes: int | None = None,
+) -> tuple[int, str]:
+    args = [
+        sys.executable,
+        "-m",
+        "src.agent",
+        "--config",
+        str(config_path),
+        "--once",
+    ]
+    if test_mode:
+        args.append("--test")
+    if test_minutes:
+        args += ["--test-minutes", str(test_minutes)]
+    result = subprocess.run(args, capture_output=True, text=True, check=False)
+    output = (result.stdout or "").strip()
+    if result.stderr:
+        output = f"{output}\n{result.stderr.strip()}".strip()
+    return result.returncode, output
 def require_password() -> bool:
     app_password = get_app_password()
     if not app_password:
@@ -797,8 +890,29 @@ def main() -> None:
                 ).strip(),
             )
 
+        st.caption("Run from UI (local machine only).")
         preview_submitted = st.form_submit_button("Preview thumbnail overlay")
         submitted = st.form_submit_button("Save config", disabled=demo_mode)
+        run_test_submitted = st.form_submit_button(
+            "Run test now (quick)",
+            disabled=demo_mode,
+        )
+        run_full_submitted = st.form_submit_button(
+            "Start full run (background)",
+            disabled=demo_mode,
+        )
+        stop_full_submitted = st.form_submit_button(
+            "Stop full run",
+            disabled=demo_mode,
+        )
+        schedule_start_submitted = st.form_submit_button(
+            "Start daily schedule (background)",
+            disabled=demo_mode,
+        )
+        schedule_stop_submitted = st.form_submit_button(
+            "Stop daily schedule",
+            disabled=demo_mode,
+        )
 
     if preview_submitted:
         auto_texts = split_text_lines(overlay_auto_texts_input)
@@ -875,7 +989,7 @@ def main() -> None:
                 except RuntimeError as exc:
                     st.error(f"Preview failed: {exc}")
 
-    if submitted:
+    def build_config() -> dict[str, Any] | None:
         saved_service_account_path = service_account_path
         saved_oauth_path = ""
         saved_drive_token = ""
@@ -921,11 +1035,14 @@ def main() -> None:
             parsed_grok_command = yaml.safe_load(grok_command) or []
         except yaml.YAMLError:
             st.error("Invalid YAML in command templates.")
-            return
-        if isinstance(loop_effects, str):
-            loop_effects = [item.strip() for item in loop_effects.split(",") if item.strip()]
+            return None
+        resolved_loop_effects = loop_effects
+        if isinstance(resolved_loop_effects, str):
+            resolved_loop_effects = [
+                item.strip() for item in resolved_loop_effects.split(",") if item.strip()
+            ]
 
-        config_out = {
+        return {
             "project": {
                 "name": project_name,
                 "output_dir": output_dir,
@@ -967,7 +1084,7 @@ def main() -> None:
                 "loop_zoom_amount": float(loop_zoom_amount),
                 "loop_pan_amount": float(loop_pan_amount),
                 "loop_motion_style": loop_motion_style,
-                "loop_effects": loop_effects or [],
+                "loop_effects": resolved_loop_effects or [],
                 "loop_sway_degrees": float(loop_sway_degrees),
                 "loop_flicker_amount": float(loop_flicker_amount),
                 "loop_hue_degrees": float(loop_hue_degrees),
@@ -1044,19 +1161,97 @@ def main() -> None:
             },
         }
 
-        save_config(config_out)
-        st.success(f"Saved config at {CONFIG_PATH}")
+    needs_save = submitted or run_test_submitted or run_full_submitted or schedule_start_submitted
+    config_out: dict[str, Any] | None = None
+    if needs_save:
+        if demo_mode:
+            st.warning("Demo mode is enabled. Disable it to save or run.")
+        else:
+            config_out = build_config()
+            if config_out is not None:
+                save_config(config_out)
+                st.success(f"Saved config at {CONFIG_PATH}")
+
+    if run_test_submitted and not demo_mode and config_out is not None:
+        test_minutes = int(test_max_minutes) if test_max_minutes else None
+        with st.spinner("Running test now..."):
+            code, output = run_agent_once_cli(
+                CONFIG_PATH,
+                test_mode=True,
+                test_minutes=test_minutes,
+            )
+        st.session_state.last_run_output = output
+        if code == 0:
+            st.success("Test run completed.")
+        else:
+            st.error("Test run failed. See output below.")
+
+    if run_full_submitted and not demo_mode and config_out is not None:
+        existing_pid = read_pid(FULLRUN_PID_PATH)
+        if existing_pid and is_pid_running(existing_pid):
+            st.info(f"Full run already running (PID {existing_pid}).")
+        else:
+            pid = start_background(
+                [
+                    sys.executable,
+                    "-m",
+                    "src.agent",
+                    "--config",
+                    str(CONFIG_PATH),
+                    "--once",
+                ],
+                FULLRUN_PID_PATH,
+                FULLRUN_LOG_PATH,
+            )
+            st.success(f"Full run started in background (PID {pid}).")
+            st.caption(f"Log: {FULLRUN_LOG_PATH}")
+
+    if stop_full_submitted and not demo_mode:
+        if stop_background(FULLRUN_PID_PATH):
+            st.success("Full run stopped.")
+        else:
+            st.info("No running full job found.")
+
+    if schedule_start_submitted and not demo_mode and config_out is not None:
+        existing_pid = read_pid(SCHEDULE_PID_PATH)
+        if existing_pid and is_pid_running(existing_pid):
+            st.info(f"Daily schedule already running (PID {existing_pid}).")
+        else:
+            pid = start_background(
+                [
+                    sys.executable,
+                    "-m",
+                    "src.agent",
+                    "--config",
+                    str(CONFIG_PATH),
+                ],
+                SCHEDULE_PID_PATH,
+                SCHEDULE_LOG_PATH,
+            )
+            st.success(f"Daily schedule started in background (PID {pid}).")
+            st.caption(f"Log: {SCHEDULE_LOG_PATH}")
+
+    if schedule_stop_submitted and not demo_mode:
+        if stop_background(SCHEDULE_PID_PATH):
+            st.success("Daily schedule stopped.")
+        else:
+            st.info("No running schedule found.")
 
     preview_path = st.session_state.get("preview_path")
     if preview_path and Path(preview_path).exists():
         st.subheader("Thumbnail preview")
         st.image(preview_path, use_column_width=True)
 
+    run_output = st.session_state.get("last_run_output")
+    if run_output:
+        st.subheader("Run output")
+        st.text_area("Latest run log", run_output, height=240)
+
     st.divider()
     st.subheader("Next steps")
     st.write(
-        "1) Set WHISK_API_KEY and GROK_API_KEY in your environment. "
-        "2) Run the agent once or schedule it."
+        "1) Set WHISK_API_KEY and GROK_API_KEY in your environment (or use ffmpeg-only). "
+        "2) Use the Run buttons above or the scripts below."
     )
     st.code(
         ".\\run-once.ps1\n"
