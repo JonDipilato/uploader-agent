@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import datetime as dt
+import hmac
+import random
 import os
 from pathlib import Path
 from typing import Any
 
 import streamlit as st
 import yaml
+from src.utils.ffmpeg import (
+    build_drawtext_filter,
+    generate_color_image,
+    render_image_with_text,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -14,6 +21,36 @@ CONFIG_PATH = ROOT / "config.yaml"
 EXAMPLE_CONFIG_PATH = ROOT / "config.example.yaml"
 SECRETS_DIR = ROOT / "secrets"
 ASSETS_DIR = ROOT / "assets"
+
+def get_app_password() -> str:
+    if "app_password" in st.secrets:
+        return str(st.secrets["app_password"]).strip()
+    return os.getenv("APP_PASSWORD", "").strip()
+
+def require_password() -> bool:
+    app_password = get_app_password()
+    if not app_password:
+        return True
+    if st.session_state.get("password_ok"):
+        return True
+
+    def password_entered() -> None:
+        entered = st.session_state.get("password", "")
+        if hmac.compare_digest(entered, app_password):
+            st.session_state["password_ok"] = True
+            st.session_state["password"] = ""
+        else:
+            st.session_state["password_ok"] = False
+
+    st.text_input(
+        "App password",
+        type="password",
+        on_change=password_entered,
+        key="password",
+    )
+    if st.session_state.get("password_ok") is False:
+        st.error("Incorrect password.")
+    return st.session_state.get("password_ok", False)
 
 
 def load_config() -> dict[str, Any]:
@@ -51,6 +88,93 @@ def save_uploaded_file(upload, dest_path: Path) -> str:
 def split_tags(text: str) -> list[str]:
     return [tag.strip() for tag in text.split(",") if tag.strip()]
 
+def split_text_lines(text: str) -> list[str]:
+    if not text:
+        return []
+    entries: list[str] = []
+    for line in text.splitlines():
+        entries.extend(line.split(","))
+    return [item.strip() for item in entries if item.strip()]
+
+def select_overlay_text(overlay_text: str, auto_texts: list[str], mode: str) -> str:
+    if overlay_text.strip():
+        return overlay_text.strip()
+    if not auto_texts:
+        return ""
+    mode = mode.strip().lower()
+    if mode == "random":
+        return random.choice(auto_texts)
+    idx = dt.date.today().toordinal() % len(auto_texts)
+    return auto_texts[idx]
+
+def resolve_path(path_value: str) -> Path:
+    path = Path(path_value).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    return path
+
+def apply_preset(config: dict[str, Any], preset: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    for section, values in preset.items():
+        section_map = config.setdefault(section, {})
+        section_map.update(values)
+    return config
+
+PRESETS: dict[str, dict[str, dict[str, Any]]] = {
+    "Cafe Steam": {
+        "visuals": {
+            "image_provider": "openai",
+            "image_prompt": (
+                "cozy coffee shop interior, warm light, soft steam, cinematic, "
+                "empty center space for title text \"{overlay_text}\", high detail"
+            ),
+            "openai_model": "gpt-image-1",
+            "openai_size": "1792x1024",
+            "loop_motion_style": "cinematic",
+            "loop_zoom_amount": 0.015,
+            "loop_pan_amount": 0.08,
+            "loop_effects": ["steam", "flicker", "vignette"],
+            "loop_flicker_amount": 0.01,
+            "loop_vignette_angle": "PI/5",
+            "loop_steam_opacity": 0.08,
+            "loop_steam_blur": 10.0,
+            "loop_steam_noise": 12,
+            "loop_steam_drift_x": 0.02,
+            "loop_steam_drift_y": 0.05,
+        },
+        "text_overlay": {
+            "text": "LOCK IN",
+            "auto_texts": ["LOCK IN", "HYPER FOCUS", "SLOW DOWN"],
+            "auto_mode": "daily",
+            "apply_to_video": False,
+            "create_thumbnail": True,
+            "upload_thumbnail": True,
+            "font_size": 96,
+            "x": "(w-text_w)/2",
+            "y": "(h-text_h)/2",
+        },
+        "upload": {
+            "title_template": "Cafe Steam Chill Mix - Cozy Coffee Shop Ambience - {date}",
+            "description_template": (
+                "Relaxing cafe ambience with gentle steam drift visuals.\n"
+                "Perfect for study, focus, reading, and sleep.\n\n"
+                "New mix daily."
+            ),
+            "tags": [
+                "cafe ambience",
+                "coffee shop ambience",
+                "study music",
+                "focus music",
+                "relaxing mix",
+                "lofi",
+                "chill beats",
+                "background music",
+                "sleep music",
+            ],
+            "category_id": "10",
+        },
+    },
+}
+
 
 def main() -> None:
     st.set_page_config(
@@ -59,6 +183,8 @@ def main() -> None:
         layout="centered",
     )
     st.title("Video Creator Agent")
+    if not require_password():
+        st.stop()
     st.caption("Fill out the settings, save config, then run or schedule.")
     demo_mode = st.sidebar.checkbox(
         "Demo mode (preview only)",
@@ -71,6 +197,20 @@ def main() -> None:
         st.session_state.config = load_config()
 
     config = st.session_state.config
+    st.subheader("Quick presets")
+    preset_choice = st.selectbox(
+        "Preset",
+        ["None"] + sorted(PRESETS.keys()),
+    )
+    if st.button("Apply preset"):
+        if preset_choice == "None":
+            st.info("Select a preset to apply.")
+        else:
+            st.session_state.config = apply_preset(
+                st.session_state.config,
+                PRESETS[preset_choice],
+            )
+            st.success("Preset applied. You can tweak fields below.")
 
     with st.form("config_form"):
         st.subheader("Project")
@@ -194,6 +334,45 @@ def main() -> None:
         background_color = cfg(config, "visuals", "background_color", "black")
         if auto_background:
             background_color = st.text_input("Background color", background_color)
+        image_provider = cfg(config, "visuals", "image_provider", "whisk")
+        image_provider = st.selectbox(
+            "Image generator (if no image path is provided)",
+            ["whisk", "openai"],
+            index=0 if image_provider == "whisk" else 1,
+        )
+        openai_api_key_env = cfg(config, "visuals", "openai_api_key_env", "OPENAI_API_KEY")
+        openai_model = cfg(config, "visuals", "openai_model", "gpt-image-1")
+        openai_size = cfg(config, "visuals", "openai_size", "1792x1024")
+        openai_quality = cfg(config, "visuals", "openai_quality", "")
+        openai_style = cfg(config, "visuals", "openai_style", "")
+        openai_base_url = cfg(
+            config,
+            "visuals",
+            "openai_base_url",
+            "https://api.openai.com/v1/images/generations",
+        )
+        if image_provider == "openai":
+            openai_api_key_env = st.text_input("OpenAI API key env var", openai_api_key_env)
+            openai_model = st.text_input("OpenAI image model", openai_model)
+            openai_size = st.selectbox(
+                "OpenAI image size",
+                ["1792x1024", "1024x1024", "1024x1792"],
+                index=["1792x1024", "1024x1024", "1024x1792"].index(
+                    openai_size if openai_size in {"1792x1024", "1024x1024", "1024x1792"} else "1792x1024"
+                ),
+            )
+            openai_quality = st.text_input(
+                "OpenAI quality (optional)",
+                openai_quality or "",
+            )
+            openai_style = st.text_input(
+                "OpenAI style (optional)",
+                openai_style or "",
+            )
+            openai_base_url = st.text_input(
+                "OpenAI base URL (optional)",
+                openai_base_url,
+            )
         image_path = st.text_input(
             "Existing image path (leave blank to generate)",
             cfg(config, "visuals", "image_path", "") or "",
@@ -201,17 +380,17 @@ def main() -> None:
         upload_image = st.file_uploader("Upload image (optional)", type=["png", "jpg", "jpeg"])
         if not image_path and not auto_background:
             image_prompt = st.text_input(
-                "Whisk image prompt",
+                "Image prompt",
                 cfg(
                     config,
                     "visuals",
                     "image_prompt",
-                    "cozy fireplace on a rainy night, warm glow, cinematic, high detail",
+                    "cozy coffee shop interior, warm light, cinematic, empty space for text, high detail",
                 ),
             )
         else:
             image_prompt = cfg(config, "visuals", "image_prompt", "")
-        st.caption("Tip: leave empty space for overlay text if you plan to add it.")
+        st.caption("Tip: leave empty space for overlay text. You can use {overlay_text} and {date}.")
 
         loop_video_path = st.text_input(
             "Existing loop video path (leave blank to generate)",
@@ -224,6 +403,8 @@ def main() -> None:
             index=0 if cfg(config, "visuals", "loop_provider", "ffmpeg") == "ffmpeg" else 1,
         )
         loop_zoom_amount = float(cfg(config, "visuals", "loop_zoom_amount", 0.02))
+        loop_pan_amount = float(cfg(config, "visuals", "loop_pan_amount", 0.15))
+        loop_motion_style = cfg(config, "visuals", "loop_motion_style", "cinematic")
         if not loop_video_path and loop_provider == "grok":
             video_prompt = st.text_input(
                 "Grok video prompt",
@@ -244,6 +425,141 @@ def main() -> None:
                 value=float(loop_zoom_amount),
                 step=0.005,
             )
+            loop_pan_amount = st.number_input(
+                "Loop pan amount (0 = no pan)",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(loop_pan_amount),
+                step=0.05,
+            )
+            loop_motion_style = st.selectbox(
+                "Motion style",
+                ["smooth", "cinematic", "orbit"],
+                index=["smooth", "cinematic", "orbit"].index(
+                    loop_motion_style if loop_motion_style in {"smooth", "cinematic", "orbit"} else "cinematic"
+                ),
+            )
+            effect_options = ["steam", "sway", "flicker", "color_drift", "vignette"]
+            effect_labels = {
+                "steam": "Steam drift",
+                "sway": "Sway (rotation)",
+                "flicker": "Flicker (brightness)",
+                "color_drift": "Color drift (hue)",
+                "vignette": "Vignette (edge darken)",
+            }
+            default_effects = cfg(
+                config,
+                "visuals",
+                "loop_effects",
+                ["flicker", "vignette"],
+            )
+            if isinstance(default_effects, str):
+                default_effects = [
+                    item.strip() for item in default_effects.split(",") if item.strip()
+                ]
+            loop_effects = st.multiselect(
+                "Extra loop effects",
+                options=effect_options,
+                default=[effect for effect in default_effects if effect in effect_options],
+                format_func=lambda key: effect_labels.get(key, key),
+            )
+            loop_sway_degrees = float(cfg(config, "visuals", "loop_sway_degrees", 0.35))
+            loop_flicker_amount = float(
+                cfg(config, "visuals", "loop_flicker_amount", 0.015)
+            )
+            loop_hue_degrees = float(cfg(config, "visuals", "loop_hue_degrees", 0.0))
+            loop_steam_opacity = float(cfg(config, "visuals", "loop_steam_opacity", 0.08))
+            loop_steam_blur = float(cfg(config, "visuals", "loop_steam_blur", 10.0))
+            loop_steam_noise = int(cfg(config, "visuals", "loop_steam_noise", 12))
+            loop_steam_drift_x = float(cfg(config, "visuals", "loop_steam_drift_x", 0.02))
+            loop_steam_drift_y = float(cfg(config, "visuals", "loop_steam_drift_y", 0.05))
+            vignette_default = cfg(config, "visuals", "loop_vignette_angle", 0.63)
+            try:
+                loop_vignette_angle = float(vignette_default)
+            except (TypeError, ValueError):
+                loop_vignette_angle = 0.63
+            if "steam" in loop_effects:
+                loop_steam_opacity = st.number_input(
+                    "Steam opacity",
+                    min_value=0.0,
+                    max_value=0.2,
+                    value=float(loop_steam_opacity),
+                    step=0.01,
+                )
+                loop_steam_blur = st.number_input(
+                    "Steam blur",
+                    min_value=0.0,
+                    max_value=30.0,
+                    value=float(loop_steam_blur),
+                    step=1.0,
+                )
+                loop_steam_noise = st.number_input(
+                    "Steam noise",
+                    min_value=0,
+                    max_value=40,
+                    value=int(loop_steam_noise),
+                    step=1,
+                )
+                loop_steam_drift_x = st.number_input(
+                    "Steam drift X",
+                    min_value=0.0,
+                    max_value=0.1,
+                    value=float(loop_steam_drift_x),
+                    step=0.005,
+                )
+                loop_steam_drift_y = st.number_input(
+                    "Steam drift Y",
+                    min_value=0.0,
+                    max_value=0.2,
+                    value=float(loop_steam_drift_y),
+                    step=0.01,
+                )
+            if "sway" in loop_effects:
+                loop_sway_degrees = st.number_input(
+                    "Sway degrees (rotation)",
+                    min_value=0.0,
+                    max_value=2.0,
+                    value=float(loop_sway_degrees),
+                    step=0.05,
+                )
+            if "flicker" in loop_effects:
+                loop_flicker_amount = st.number_input(
+                    "Flicker amount",
+                    min_value=0.0,
+                    max_value=0.05,
+                    value=float(loop_flicker_amount),
+                    step=0.005,
+                )
+            if "color_drift" in loop_effects:
+                loop_hue_degrees = st.number_input(
+                    "Color drift degrees",
+                    min_value=0.0,
+                    max_value=6.0,
+                    value=float(loop_hue_degrees),
+                    step=0.25,
+                )
+            if "vignette" in loop_effects:
+                loop_vignette_angle = st.number_input(
+                    "Vignette angle (lower = stronger)",
+                    min_value=0.2,
+                    max_value=1.5,
+                    value=float(loop_vignette_angle),
+                    step=0.05,
+                )
+        else:
+            loop_effects = cfg(config, "visuals", "loop_effects", [])
+            loop_sway_degrees = float(cfg(config, "visuals", "loop_sway_degrees", 0.35))
+            loop_flicker_amount = float(
+                cfg(config, "visuals", "loop_flicker_amount", 0.015)
+            )
+            loop_hue_degrees = float(cfg(config, "visuals", "loop_hue_degrees", 0.0))
+            loop_vignette_angle = cfg(config, "visuals", "loop_vignette_angle", 0.63)
+            loop_steam_opacity = float(cfg(config, "visuals", "loop_steam_opacity", 0.08))
+            loop_steam_blur = float(cfg(config, "visuals", "loop_steam_blur", 10.0))
+            loop_steam_noise = int(cfg(config, "visuals", "loop_steam_noise", 12))
+            loop_steam_drift_x = float(cfg(config, "visuals", "loop_steam_drift_x", 0.02))
+            loop_steam_drift_y = float(cfg(config, "visuals", "loop_steam_drift_y", 0.05))
+            loop_motion_style = cfg(config, "visuals", "loop_motion_style", "cinematic")
 
         loop_duration = st.number_input(
             "Loop duration (seconds)",
@@ -262,6 +578,15 @@ def main() -> None:
         overlay_text = st.text_area(
             "Overlay text (leave blank to disable)",
             cfg(config, "text_overlay", "text", "") or "",
+        )
+        overlay_auto_texts_input = st.text_area(
+            "Auto overlay texts (one per line, used only if overlay text is blank)",
+            "\n".join(cfg(config, "text_overlay", "auto_texts", [])),
+        )
+        overlay_auto_mode = st.selectbox(
+            "Auto text mode",
+            ["daily", "random"],
+            index=0 if cfg(config, "text_overlay", "auto_mode", "daily") == "daily" else 1,
         )
         overlay_apply_to_video = st.checkbox(
             "Burn text into video",
@@ -382,6 +707,24 @@ def main() -> None:
             ", ".join(cfg(config, "upload", "tags", ["ambient", "chill", "fireplace"])),
         )
 
+        st.subheader("Tracklist")
+        tracklist_enabled = st.checkbox(
+            "Generate timestamps",
+            value=bool(cfg(config, "tracklist", "enabled", True)),
+        )
+        tracklist_append = st.checkbox(
+            "Append tracklist to description",
+            value=bool(cfg(config, "tracklist", "append_to_description", True)),
+        )
+        tracklist_embed = st.checkbox(
+            "Embed chapters into MP4",
+            value=bool(cfg(config, "tracklist", "embed_chapters", True)),
+        )
+        tracklist_filename = st.text_input(
+            "Tracklist filename",
+            cfg(config, "tracklist", "filename", "tracklist.txt"),
+        )
+
         st.subheader("Test mode")
         test_enabled = st.checkbox(
             "Enable test mode (no upload, no repeat)",
@@ -451,7 +794,83 @@ def main() -> None:
                 ).strip(),
             )
 
+        preview_submitted = st.form_submit_button("Preview thumbnail overlay")
         submitted = st.form_submit_button("Save config", disabled=demo_mode)
+
+    if preview_submitted:
+        auto_texts = split_text_lines(overlay_auto_texts_input)
+        selected_text = select_overlay_text(
+            overlay_text,
+            auto_texts,
+            overlay_auto_mode,
+        )
+        if not selected_text:
+            st.warning("Add overlay text or auto texts to generate a preview.")
+        else:
+            preview_dir = ROOT / "runs" / "_preview"
+            preview_dir.mkdir(parents=True, exist_ok=True)
+            preview_text_path = preview_dir / "preview_overlay.txt"
+            preview_text_path.write_text(selected_text, encoding="utf-8")
+
+            preview_image_path = None
+            if upload_image is not None:
+                suffix = Path(upload_image.name).suffix or ".png"
+                preview_image_path = preview_dir / f"preview_base{suffix}"
+                preview_image_path.write_bytes(upload_image.getvalue())
+            elif image_path:
+                resolved_image = resolve_path(image_path)
+                if resolved_image.exists():
+                    preview_image_path = resolved_image
+                else:
+                    st.error(f"Image not found: {resolved_image}")
+            elif auto_background:
+                preview_image_path = preview_dir / "preview_base.png"
+                generate_color_image(
+                    preview_image_path,
+                    resolution=resolution,
+                    color=background_color,
+                )
+            else:
+                st.warning("Provide an image or enable auto background to preview.")
+
+            if preview_image_path:
+                preview_font_path = None
+                if upload_overlay_font is not None:
+                    suffix = Path(upload_overlay_font.name).suffix or ".ttf"
+                    preview_font_path = preview_dir / f"preview_font{suffix}"
+                    preview_font_path.write_bytes(upload_overlay_font.getvalue())
+                elif overlay_font_path:
+                    resolved_font = resolve_path(overlay_font_path)
+                    if resolved_font.exists():
+                        preview_font_path = resolved_font
+
+                drawtext_filter = build_drawtext_filter(
+                    textfile=preview_text_path,
+                    fontfile=preview_font_path,
+                    font=overlay_font_name or None,
+                    font_size=int(overlay_font_size),
+                    font_color=overlay_font_color,
+                    x=overlay_x,
+                    y=overlay_y,
+                    border_color=overlay_outline_color,
+                    border_width=int(overlay_outline_width),
+                    box_color=cfg(config, "text_overlay", "box_color", None),
+                    box_borderw=cfg(config, "text_overlay", "box_borderw", None),
+                    shadow_color=cfg(config, "text_overlay", "shadow_color", None),
+                    shadow_x=cfg(config, "text_overlay", "shadow_x", None),
+                    shadow_y=cfg(config, "text_overlay", "shadow_y", None),
+                )
+                preview_output = preview_dir / "thumbnail_preview.png"
+                try:
+                    render_image_with_text(
+                        preview_image_path,
+                        preview_output,
+                        drawtext_filter,
+                    )
+                    st.session_state.preview_path = str(preview_output)
+                    st.success(f"Preview generated with: {selected_text}")
+                except RuntimeError as exc:
+                    st.error(f"Preview failed: {exc}")
 
     if submitted:
         saved_service_account_path = service_account_path
@@ -500,6 +919,8 @@ def main() -> None:
         except yaml.YAMLError:
             st.error("Invalid YAML in command templates.")
             return
+        if isinstance(loop_effects, str):
+            loop_effects = [item.strip() for item in loop_effects.split(",") if item.strip()]
 
         config_out = {
             "project": {
@@ -532,8 +953,27 @@ def main() -> None:
                 "fps": int(fps),
                 "image_path": saved_image_path or None,
                 "loop_video_path": saved_loop_path or None,
+                "image_provider": image_provider,
+                "openai_api_key_env": openai_api_key_env,
+                "openai_model": openai_model,
+                "openai_size": openai_size,
+                "openai_quality": openai_quality or None,
+                "openai_style": openai_style or None,
+                "openai_base_url": openai_base_url or None,
                 "loop_provider": loop_provider,
                 "loop_zoom_amount": float(loop_zoom_amount),
+                "loop_pan_amount": float(loop_pan_amount),
+                "loop_motion_style": loop_motion_style,
+                "loop_effects": loop_effects or [],
+                "loop_sway_degrees": float(loop_sway_degrees),
+                "loop_flicker_amount": float(loop_flicker_amount),
+                "loop_hue_degrees": float(loop_hue_degrees),
+                "loop_vignette_angle": loop_vignette_angle,
+                "loop_steam_opacity": float(loop_steam_opacity),
+                "loop_steam_blur": float(loop_steam_blur),
+                "loop_steam_noise": int(loop_steam_noise),
+                "loop_steam_drift_x": float(loop_steam_drift_x),
+                "loop_steam_drift_y": float(loop_steam_drift_y),
                 "auto_background": auto_background,
                 "background_color": background_color,
                 "whisk_mode": "command",
@@ -547,6 +987,8 @@ def main() -> None:
             },
             "text_overlay": {
                 "text": overlay_text or None,
+                "auto_texts": split_text_lines(overlay_auto_texts_input),
+                "auto_mode": overlay_auto_mode,
                 "fontfile": saved_overlay_font_path or None,
                 "font": overlay_font_name or None,
                 "font_size": int(overlay_font_size),
@@ -581,6 +1023,12 @@ def main() -> None:
                 "description_template": description_template,
                 "tags": split_tags(tags_text),
             },
+            "tracklist": {
+                "enabled": tracklist_enabled,
+                "filename": tracklist_filename or "tracklist.txt",
+                "append_to_description": tracklist_append,
+                "embed_chapters": tracklist_embed,
+            },
             "test": {
                 "enabled": test_enabled,
                 "max_minutes": int(test_max_minutes) if test_max_minutes else None,
@@ -595,6 +1043,11 @@ def main() -> None:
 
         save_config(config_out)
         st.success(f"Saved config at {CONFIG_PATH}")
+
+    preview_path = st.session_state.get("preview_path")
+    if preview_path and Path(preview_path).exists():
+        st.subheader("Thumbnail preview")
+        st.image(preview_path, use_column_width=True)
 
     st.divider()
     st.subheader("Next steps")

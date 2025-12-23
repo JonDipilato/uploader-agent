@@ -6,3 +6,6 @@ runs/
 *.log
 assets/
 .streamlit.log
+.streamlit/
+config.test.yaml
+config.grok_test.yaml

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import datetime as dt
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 from .providers.drive import DriveClient, DriveConfig
 from .providers.grok import GrokClient, GrokConfig
+from .providers.openai_images import OpenAIImageClient, OpenAIImageConfig
 from .providers.uploader_base import UploaderBase
 from .providers.whisk import WhiskClient, WhiskConfig
 from .providers.youtube_uploader import YouTubeConfig, YouTubeUploader
@@ -15,10 +17,12 @@ from .utils.ffmpeg import (
     concat_audio,
     generate_color_image,
     generate_loop_video_from_image,
+    mux_chapters,
     probe_duration_seconds,
     render_image_with_text,
     render_video,
     trim_audio,
+    write_ffmetadata_chapters,
     write_concat_list,
 )
 
@@ -30,6 +34,7 @@ class RunArtifacts:
     image_path: Path
     loop_video_path: Path
     thumbnail_path: Path | None
+    tracklist_path: Path | None
     output_video_path: Path
 
 
@@ -57,8 +62,9 @@ class VideoCreatorAgent:
         if not audio_files:
             raise RuntimeError("No MP3 files found for the selected audio source")
 
+        duration_map = self._probe_durations(audio_files)
         target_min = self._target_min_seconds() if repeat_playlist else 0.0
-        playlist, total_seconds = self._build_playlist(audio_files, target_min)
+        playlist, total_seconds = self._build_playlist(audio_files, target_min, duration_map)
         concat_list_path = run_dir / "concat.txt"
         write_concat_list(playlist, concat_list_path)
 
@@ -91,9 +97,17 @@ class VideoCreatorAgent:
             audio_path = trimmed_audio
             total_seconds = max_seconds
 
-        image_path = self._ensure_image(run_dir)
+        overlay_text = self._resolve_overlay_text()
+        image_path = self._ensure_image(run_dir, overlay_text)
         loop_video_path = self._ensure_loop_video(run_dir, image_path)
-        overlay = self._build_text_overlay(run_dir)
+        overlay = self._build_text_overlay(run_dir, overlay_text)
+        tracklist_path = self._write_tracklist(
+            run_dir,
+            playlist,
+            duration_map,
+            enabled=self._cfg("tracklist", "enabled", default=True),
+            filename=self._cfg("tracklist", "filename", default="tracklist.txt"),
+        )
         drawtext_filter = None
         thumbnail_path = None
         if overlay:
@@ -130,12 +144,24 @@ class VideoCreatorAgent:
             drawtext_filter=drawtext_filter if overlay and overlay["apply_to_video"] else None,
         )
 
+        if tracklist_path and self._cfg("tracklist", "embed_chapters", default=True):
+            metadata_path = run_dir / "chapters.ffmetadata"
+            write_ffmetadata_chapters(playlist, duration_map, metadata_path)
+            chapters_output = run_dir / f"{output_video_path.stem}_chapters{output_video_path.suffix}"
+            mux_chapters(output_video_path, metadata_path, chapters_output)
+            output_video_path.unlink(missing_ok=True)
+            chapters_output.replace(output_video_path)
+
         if self._cfg("upload", "enabled", default=True) and not disable_upload:
             uploader = self._build_uploader()
             title = self._render_template(self._cfg("upload", "title_template", default=""))
             description = self._render_template(
                 self._cfg("upload", "description_template", default="")
             )
+            if tracklist_path and self._cfg(
+                "tracklist", "append_to_description", default=True
+            ):
+                description = self._append_tracklist(description, tracklist_path)
             tags = self._cfg("upload", "tags", default=None)
             upload_result = uploader.upload_video(
                 output_video_path,
@@ -162,6 +188,7 @@ class VideoCreatorAgent:
             image_path=image_path,
             loop_video_path=loop_video_path,
             thumbnail_path=thumbnail_path,
+            tracklist_path=tracklist_path,
             output_video_path=output_video_path,
         )
 
@@ -227,8 +254,18 @@ class VideoCreatorAgent:
             files.sort(key=lambda path: path.name.lower())
         return files
 
-    def _build_playlist(self, files: list[Path], target_min: float) -> tuple[list[Path], float]:
-        durations = [probe_duration_seconds(path) for path in files]
+    def _probe_durations(self, files: list[Path]) -> dict[Path, float]:
+        return {path: probe_duration_seconds(path) for path in files}
+
+    def _build_playlist(
+        self,
+        files: list[Path],
+        target_min: float,
+        duration_map: dict[Path, float] | None = None,
+    ) -> tuple[list[Path], float]:
+        if duration_map is None:
+            duration_map = self._probe_durations(files)
+        durations = [duration_map[path] for path in files]
         if target_min <= 0:
             return files, sum(durations)
         playlist: list[Path] = []
@@ -242,7 +279,7 @@ class VideoCreatorAgent:
             index += 1
         return playlist, total
 
-    def _ensure_image(self, run_dir: Path) -> Path:
+    def _ensure_image(self, run_dir: Path, overlay_text: str | None = None) -> Path:
         image_path = self._cfg("visuals", "image_path", default=None)
         if image_path:
             resolved = Path(image_path)
@@ -254,16 +291,39 @@ class VideoCreatorAgent:
             "visuals", "prompt", default=None
         )
         if prompt:
+            prompt = self._render_prompt_template(prompt, overlay_text)
             output_path = run_dir / "visual.png"
-            whisk = WhiskClient(
-                WhiskConfig(
-                    mode=self._cfg("visuals", "whisk_mode", default="command"),
-                    command=self._cfg("visuals", "whisk_command", default=None),
-                    api_key_env=self._cfg("visuals", "whisk_api_key_env", default=None),
-                    model=self._cfg("visuals", "whisk_model", default=None),
+            provider = self._cfg("visuals", "image_provider", default="whisk")
+            if provider == "openai":
+                openai = OpenAIImageClient(
+                    OpenAIImageConfig(
+                        api_key_env=self._cfg(
+                            "visuals", "openai_api_key_env", default="OPENAI_API_KEY"
+                        ),
+                        model=self._cfg("visuals", "openai_model", default="gpt-image-1"),
+                        size=self._cfg("visuals", "openai_size", default="1792x1024"),
+                        quality=self._cfg("visuals", "openai_quality", default=None),
+                        style=self._cfg("visuals", "openai_style", default=None),
+                        base_url=self._cfg(
+                            "visuals",
+                            "openai_base_url",
+                            default="https://api.openai.com/v1/images/generations",
+                        ),
+                    )
                 )
-            )
-            whisk.generate_image(prompt, output_path)
+                openai.generate_image(prompt, output_path)
+            elif provider == "whisk":
+                whisk = WhiskClient(
+                    WhiskConfig(
+                        mode=self._cfg("visuals", "whisk_mode", default="command"),
+                        command=self._cfg("visuals", "whisk_command", default=None),
+                        api_key_env=self._cfg("visuals", "whisk_api_key_env", default=None),
+                        model=self._cfg("visuals", "whisk_model", default=None),
+                    )
+                )
+                whisk.generate_image(prompt, output_path)
+            else:
+                raise ValueError(f"Unsupported image provider: {provider}")
             return output_path
 
         if self._cfg("visuals", "auto_background", default=False):
@@ -319,6 +379,9 @@ class VideoCreatorAgent:
             return output_path
 
         if provider == "ffmpeg":
+            effects = self._cfg("visuals", "loop_effects", default=[])
+            if isinstance(effects, str):
+                effects = [item.strip() for item in effects.split(",") if item.strip()]
             generate_loop_video_from_image(
                 image_path=image_path,
                 output_path=output_path,
@@ -326,6 +389,18 @@ class VideoCreatorAgent:
                 fps=fps,
                 resolution=self._cfg("video", "resolution", default="1920x1080"),
                 zoom_amount=self._cfg("visuals", "loop_zoom_amount", default=0.02),
+                pan_amount=self._cfg("visuals", "loop_pan_amount", default=0.0),
+                effects=effects,
+                sway_degrees=self._cfg("visuals", "loop_sway_degrees", default=0.35),
+                flicker_amount=self._cfg("visuals", "loop_flicker_amount", default=0.015),
+                hue_degrees=self._cfg("visuals", "loop_hue_degrees", default=0.0),
+                vignette_angle=self._cfg("visuals", "loop_vignette_angle", default=None),
+                motion_style=self._cfg("visuals", "loop_motion_style", default="smooth"),
+                steam_opacity=self._cfg("visuals", "loop_steam_opacity", default=0.08),
+                steam_blur=self._cfg("visuals", "loop_steam_blur", default=10.0),
+                steam_noise=self._cfg("visuals", "loop_steam_noise", default=12),
+                steam_drift_x=self._cfg("visuals", "loop_steam_drift_x", default=0.02),
+                steam_drift_y=self._cfg("visuals", "loop_steam_drift_y", default=0.05),
             )
             return output_path
 
@@ -361,9 +436,13 @@ class VideoCreatorAgent:
             return None
         return Path(value)
 
-    def _build_text_overlay(self, run_dir: Path) -> dict | None:
+    def _build_text_overlay(
+        self,
+        run_dir: Path,
+        overlay_text: str | None = None,
+    ) -> dict | None:
         overlay_cfg = self.config.get("text_overlay", {})
-        text = overlay_cfg.get("text", "")
+        text = overlay_text if overlay_text is not None else self._resolve_overlay_text()
         if not text:
             return None
         textfile = run_dir / "overlay.txt"
@@ -393,3 +472,69 @@ class VideoCreatorAgent:
             "create_thumbnail": overlay_cfg.get("create_thumbnail", True),
             "upload_thumbnail": overlay_cfg.get("upload_thumbnail", False),
         }
+
+    def _resolve_overlay_text(self) -> str:
+        overlay_cfg = self.config.get("text_overlay", {})
+        text = overlay_cfg.get("text") or ""
+        if not text:
+            auto_texts = overlay_cfg.get("auto_texts", [])
+            if isinstance(auto_texts, str):
+                parts: list[str] = []
+                for line in auto_texts.splitlines():
+                    parts.extend(line.split(","))
+                auto_texts = parts
+            auto_texts = [item.strip() for item in auto_texts if str(item).strip()]
+            if auto_texts:
+                mode = str(overlay_cfg.get("auto_mode", "daily")).strip().lower()
+                if mode == "random":
+                    text = random.choice(auto_texts)
+                else:
+                    idx = dt.date.today().toordinal() % len(auto_texts)
+                    text = auto_texts[idx]
+        return str(text).strip()
+
+    def _render_prompt_template(self, template: str, overlay_text: str | None) -> str:
+        class _SafeDict(dict):
+            def __missing__(self, key: str) -> str:
+                return "{" + key + "}"
+
+        replacements = {
+            "date": dt.date.today().isoformat(),
+            "overlay_text": overlay_text or "",
+        }
+        return template.format_map(_SafeDict(replacements))
+
+    def _write_tracklist(
+        self,
+        run_dir: Path,
+        playlist: list[Path],
+        duration_map: dict[Path, float],
+        enabled: bool,
+        filename: str,
+    ) -> Path | None:
+        if not enabled:
+            return None
+        entries: list[str] = []
+        current = 0.0
+        for path in playlist:
+            title = path.stem
+            entries.append(f"{self._format_timestamp(current)} {title}")
+            current += duration_map.get(path, 0.0)
+        tracklist_path = run_dir / filename
+        tracklist_path.write_text("\n".join(entries) + "\n", encoding="utf-8")
+        return tracklist_path
+
+    def _append_tracklist(self, description: str, tracklist_path: Path) -> str:
+        tracklist_text = tracklist_path.read_text(encoding="utf-8").strip()
+        if not tracklist_text:
+            return description
+        if description:
+            return f"{description}\n\nTracklist:\n{tracklist_text}"
+        return f"Tracklist:\n{tracklist_text}"
+
+    def _format_timestamp(self, seconds: float) -> str:
+        total = int(round(seconds))
+        hours = total // 3600
+        minutes = (total % 3600) // 60
+        secs = total % 60
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"

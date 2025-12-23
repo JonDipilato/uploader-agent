@@ -57,6 +57,41 @@ Automates an 8-9 hour looped visual + audio video:
    .\schedule-task.ps1
    ```
 
+## Password-protected UI (optional)
+
+If you set a password, the Streamlit UI will prompt for it on load.
+
+Local (PowerShell):
+```powershell
+$env:APP_PASSWORD="YOUR_PASSWORD"
+```
+
+Local (Streamlit secrets file):
+```toml
+app_password = "YOUR_PASSWORD"
+```
+Save that in `.streamlit/secrets.toml` (do not commit it).
+
+## Streamlit Community Cloud (share with a friend)
+
+This is the easiest way to share the UI without giving repo access.
+
+1. Push the repo to GitHub.
+2. Go to https://share.streamlit.io and click "New app".
+3. Select your repo + branch and set the main file to `streamlit_app.py`.
+4. In "Advanced settings" > "Secrets", add:
+   ```toml
+   app_password = "DilaraTemp#$"
+   WHISK_API_KEY = "YOUR_KEY"
+   GROK_API_KEY = "YOUR_KEY"
+   OPENAI_API_KEY = "YOUR_KEY" # optional
+   ```
+5. Deploy and share the app URL + password.
+
+Notes:
+- Streamlit Community Cloud apps are public by URL on the free plan; the password gate protects access.
+- Long 8-9 hour renders are best run locally or on your own machine.
+
 ## Credentials checklist
 
 - Drive service account JSON (only if using Google Drive; share the folder with the service account email).
@@ -133,6 +168,21 @@ visuals:
 
 If you already have assets, set `visuals.image_path` and/or `visuals.loop_video_path` to skip generation.
 If you want to avoid Grok entirely, set `visuals.loop_provider: ffmpeg` (default) to create a loop from the image.
+You can include `{overlay_text}` or `{date}` in `visuals.image_prompt` to align the prompt with the daily thumbnail text.
+
+## OpenAI image generation (optional)
+
+If you want a new original image each run without Whisk, set:
+```yaml
+visuals:
+  image_provider: "openai"
+  image_prompt: "cozy coffee shop interior, warm light, cinematic, empty space for text, high detail"
+  openai_api_key_env: "OPENAI_API_KEY"
+```
+Then export your key in the environment before running:
+```powershell
+$env:OPENAI_API_KEY="sk-..."
+```
 
 ## YouTube upload
 
@@ -143,7 +193,12 @@ If you want to avoid Grok entirely, set `visuals.loop_provider: ffmpeg` (default
 
 ## Text overlay + thumbnails
 
-Set `text_overlay.text` to burn text onto the video and generate a matching thumbnail. If you want the thumbnail uploaded automatically, set `text_overlay.upload_thumbnail: true`. In the UI, use the "Text Overlay + Thumbnail" section.
+Set `text_overlay.text` to burn text onto the video and generate a matching thumbnail. If you want the thumbnail uploaded automatically, set `text_overlay.upload_thumbnail: true`. You can also set `text_overlay.auto_texts` + `text_overlay.auto_mode` (daily/random) to rotate text automatically when `text_overlay.text` is blank. In the UI, use the "Text Overlay + Thumbnail" section.
+In the UI, click "Preview thumbnail overlay" to see placement without rendering a full video.
+
+## Tracklist timestamps
+
+The agent can generate a `tracklist.txt` with timestamps, embed chapters in the MP4, and optionally append the list to the upload description. Control this via the `tracklist` section in config or the UI.
 
 ## Local audio (no Drive)
 
@@ -220,4 +275,8 @@ To remove the scheduled task:
 - If you use text overlay, design the image prompt with empty space behind the text and provide a TTF/OTF font file.
 - If you select the ffmpeg loop generator, no Grok account is required.
 - If you enable `visuals.auto_background`, the agent will generate a plain background image with ffmpeg.
+- For more motion, increase `visuals.loop_pan_amount` and `visuals.loop_zoom_amount`.
+- Optional extra loop effects: set `visuals.loop_effects` (steam, sway, flicker, color_drift, vignette) and tweak `loop_sway_degrees`, `loop_flicker_amount`, `loop_hue_degrees`, `loop_vignette_angle`.
+- For a coffee-steam look, enable `steam` and adjust `loop_steam_opacity`, `loop_steam_blur`, `loop_steam_noise`, `loop_steam_drift_x`, `loop_steam_drift_y`.
+- For smoother motion, set `visuals.loop_motion_style: cinematic` and avoid `sway` unless you want a handheld feel.
 - For production reliability, consider running the agent under systemd or a container with a watchdog.

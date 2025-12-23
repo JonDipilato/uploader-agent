@@ -152,13 +152,29 @@ def main() -> None:
     image_path = prompt_path("Existing image path (leave blank to generate)", "")
     image_prompt = ""
     auto_background = False
+    image_provider = "whisk"
+    openai_api_key_env = "OPENAI_API_KEY"
+    openai_model = "gpt-image-1"
+    openai_size = "1792x1024"
+    openai_quality = ""
+    openai_style = ""
+    openai_base_url = "https://api.openai.com/v1/images/generations"
     if not image_path:
         auto_background = prompt_bool("Auto-generate background (no Whisk)?", default=False)
     if not image_path and not auto_background:
+        image_provider = prompt("Image provider (whisk/openai)", "openai").strip().lower()
+        if image_provider not in {"whisk", "openai"}:
+            image_provider = "openai"
         image_prompt = prompt(
-            "Whisk image prompt",
-            "cozy fireplace on a rainy night, warm glow, cinematic, high detail",
+            "Image prompt",
+            "cozy coffee shop interior, warm light, cinematic, empty space for title text \"{overlay_text}\", high detail",
         )
+        if image_provider == "openai":
+            openai_api_key_env = prompt("OpenAI API key env var", "OPENAI_API_KEY")
+            openai_model = prompt("OpenAI image model", "gpt-image-1")
+            openai_size = prompt("OpenAI image size", "1792x1024")
+            openai_quality = prompt("OpenAI quality (optional)", "")
+            openai_style = prompt("OpenAI style (optional)", "")
 
     loop_video_path = prompt_path("Existing loop video path (leave blank to generate)", "")
     loop_provider = prompt("Loop generator (ffmpeg/grok)", "ffmpeg").strip().lower()
@@ -174,10 +190,54 @@ def main() -> None:
     loop_duration = prompt_int("Loop duration seconds", 5)
     fps = prompt_int("FPS", 30)
     loop_zoom_amount = 0.02
+    loop_pan_amount = 0.15
+    loop_motion_style = "cinematic"
+    loop_effects: list[str] = []
+    loop_sway_degrees = 0.35
+    loop_flicker_amount = 0.015
+    loop_hue_degrees = 0.0
+    loop_vignette_angle = 0.63
+    loop_steam_opacity = 0.08
+    loop_steam_blur = 10.0
+    loop_steam_noise = 12
+    loop_steam_drift_x = 0.02
+    loop_steam_drift_y = 0.05
     if loop_provider == "ffmpeg":
         loop_zoom_amount = prompt_float("Loop zoom amount (subtle motion)", 0.02)
+        loop_pan_amount = prompt_float("Loop pan amount (0 = no pan)", 0.15)
+        loop_motion_style = prompt("Motion style (smooth/cinematic/orbit)", "cinematic").strip().lower()
+        if loop_motion_style not in {"smooth", "cinematic", "orbit"}:
+            loop_motion_style = "cinematic"
+        if prompt_bool("Add coffee steam drift?", default=False):
+            loop_effects.append("steam")
+            loop_steam_opacity = prompt_float("Steam opacity", 0.08)
+            loop_steam_blur = prompt_float("Steam blur", 10.0)
+            loop_steam_noise = prompt_int("Steam noise", 12)
+            loop_steam_drift_x = prompt_float("Steam drift X", 0.02)
+            loop_steam_drift_y = prompt_float("Steam drift Y", 0.05)
+        if prompt_bool("Add extra loop effects (flicker/vignette)?", default=True):
+            loop_effects.extend(["flicker", "vignette"])
+            loop_flicker_amount = prompt_float("Flicker amount", 0.015)
+            loop_vignette_angle = prompt_float("Vignette angle (lower = stronger)", 0.63)
+            if prompt_bool("Add gentle sway rotation?", default=False):
+                loop_effects.append("sway")
+                loop_sway_degrees = prompt_float("Sway degrees (rotation)", 0.35)
+            if prompt_bool("Add subtle color drift?", default=False):
+                loop_effects.append("color_drift")
+                loop_hue_degrees = prompt_float("Color drift degrees", 1.5)
 
     overlay_text = prompt("Overlay text (blank for none)", "")
+    overlay_auto_texts: list[str] = []
+    overlay_auto_mode = "daily"
+    if not overlay_text and prompt_bool("Rotate auto overlay text each day?", default=False):
+        raw_auto_texts = prompt(
+            "Auto overlay texts (comma-separated)",
+            "LOCK IN, HYPER FOCUS, SLOW DOWN",
+        )
+        overlay_auto_texts = [item.strip() for item in raw_auto_texts.split(",") if item.strip()]
+        overlay_auto_mode = prompt("Auto text mode (daily/random)", "daily").strip().lower()
+        if overlay_auto_mode not in {"daily", "random"}:
+            overlay_auto_mode = "daily"
     overlay_apply_to_video = True
     overlay_create_thumbnail = True
     overlay_upload_thumbnail = False
@@ -235,6 +295,11 @@ def main() -> None:
 
     daily_time = prompt("Daily publish time (HH:MM, 24h)", "03:00")
 
+    tracklist_enabled = prompt_bool("Generate tracklist timestamps?", default=True)
+    tracklist_append = prompt_bool("Append tracklist to description?", default=True)
+    tracklist_embed = prompt_bool("Embed chapters into MP4?", default=True)
+    tracklist_filename = prompt("Tracklist filename", "tracklist.txt")
+
     test_enabled = prompt_bool("Enable test mode (no upload, no repeat)?", default=False)
     test_max_minutes = prompt_int("Test max minutes (0 = full length)", 0)
 
@@ -291,8 +356,28 @@ visuals:
   fps: {fps}
   image_path: {yaml_quote(path_for_config(normalize_path(image_path))) if image_path else "null"}
   loop_video_path: {yaml_quote(path_for_config(normalize_path(loop_video_path))) if loop_video_path else "null"}
+  image_provider: {yaml_quote(image_provider)}
+  openai_api_key_env: {yaml_quote(openai_api_key_env)}
+  openai_model: {yaml_quote(openai_model)}
+  openai_size: {yaml_quote(openai_size)}
+  openai_quality: {yaml_quote(openai_quality) if openai_quality else "null"}
+  openai_style: {yaml_quote(openai_style) if openai_style else "null"}
+  openai_base_url: {yaml_quote(openai_base_url)}
   loop_provider: {yaml_quote(loop_provider)}
   loop_zoom_amount: {loop_zoom_amount}
+  loop_pan_amount: {loop_pan_amount}
+  loop_motion_style: {yaml_quote(loop_motion_style)}
+  loop_effects:
+{yaml_list(loop_effects)}
+  loop_sway_degrees: {loop_sway_degrees}
+  loop_flicker_amount: {loop_flicker_amount}
+  loop_hue_degrees: {loop_hue_degrees}
+  loop_vignette_angle: {loop_vignette_angle}
+  loop_steam_opacity: {loop_steam_opacity}
+  loop_steam_blur: {loop_steam_blur}
+  loop_steam_noise: {loop_steam_noise}
+  loop_steam_drift_x: {loop_steam_drift_x}
+  loop_steam_drift_y: {loop_steam_drift_y}
   auto_background: {"true" if auto_background else "false"}
   background_color: "black"
   whisk_mode: "command"
@@ -308,6 +393,9 @@ visuals:
 
 text_overlay:
   text: {yaml_quote(overlay_text) if overlay_text else "null"}
+  auto_texts:
+{yaml_list(overlay_auto_texts)}
+  auto_mode: {yaml_quote(overlay_auto_mode)}
   fontfile: {yaml_quote(overlay_font_path) if overlay_font_path else "null"}
   font: null
   font_size: {overlay_font_size}
@@ -346,6 +434,12 @@ upload:
 schedule:
   enabled: true
   daily_time: {yaml_quote(daily_time)}
+
+tracklist:
+  enabled: {"true" if tracklist_enabled else "false"}
+  filename: {yaml_quote(tracklist_filename)}
+  append_to_description: {"true" if tracklist_append else "false"}
+  embed_chapters: {"true" if tracklist_embed else "false"}
 
 test:
   enabled: {"true" if test_enabled else "false"}
