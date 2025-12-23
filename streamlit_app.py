@@ -330,12 +330,20 @@ def main() -> None:
         drive_folder_id = cfg(config, "audio", "drive_folder_id", "")
         local_folder = cfg(config, "audio", "local_folder", "")
         recursive = bool(cfg(config, "audio", "recursive", False))
+        uploaded_audio_files = []
         if audio_source == "local":
             local_folder = st.text_input(
                 "Local folder path (MP3s)",
                 local_folder or "C:\\Users\\USERNAME\\Music",
             )
             recursive = st.checkbox("Scan subfolders", value=recursive)
+            uploaded_audio_files = st.file_uploader(
+                "Upload MP3 files (optional)",
+                type=["mp3"],
+                accept_multiple_files=True,
+            )
+            if uploaded_audio_files:
+                st.caption("Uploaded files override the folder path for this run.")
         else:
             drive_folder_id = st.text_input(
                 "Google Drive folder ID (MP3s)",
@@ -1013,6 +1021,16 @@ def main() -> None:
         if upload_image is not None:
             saved_image_path = save_uploaded_file(upload_image, ASSETS_DIR / "image.png")
 
+        saved_audio_folder = local_folder
+        if audio_source == "local" and uploaded_audio_files:
+            timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            audio_upload_dir = ASSETS_DIR / "audio_uploads" / timestamp
+            audio_upload_dir.mkdir(parents=True, exist_ok=True)
+            for upload in uploaded_audio_files:
+                filename = Path(upload.name).name
+                (audio_upload_dir / filename).write_bytes(upload.getvalue())
+            saved_audio_folder = path_for_config(audio_upload_dir)
+
         saved_loop_path = loop_video_path
         if upload_loop is not None:
             saved_loop_path = save_uploaded_file(upload_loop, ASSETS_DIR / "loop.mp4")
@@ -1050,7 +1068,7 @@ def main() -> None:
             "audio": {
                 "source": audio_source,
                 "drive_folder_id": drive_folder_id,
-                "local_folder": local_folder or None,
+                "local_folder": saved_audio_folder or None,
                 "ordering": ordering,
                 "repeat_playlist": repeat_playlist,
                 "recursive": recursive,
