@@ -9,3 +9,6 @@ assets/
 .streamlit/
 config.test.yaml
 config.grok_test.yaml
+.serena/
+CLAUDE.md
+*.code-workspace

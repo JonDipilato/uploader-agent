@@ -1,9 +1,12 @@
+"""Video Creator Agent - Modern Dashboard UI"""
 from __future__ import annotations
 
 import datetime as dt
 import hmac
+import math
 import random
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -18,7 +21,9 @@ from src.utils.ffmpeg import (
     render_image_with_text,
 )
 
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Constants
+# ─────────────────────────────────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.yaml"
 EXAMPLE_CONFIG_PATH = ROOT / "config.example.yaml"
@@ -30,191 +35,348 @@ SCHEDULE_LOG_PATH = RUNS_UI_DIR / "scheduler.log"
 FULLRUN_PID_PATH = RUNS_UI_DIR / "full_run.pid"
 FULLRUN_LOG_PATH = RUNS_UI_DIR / "full_run.log"
 
-def get_app_password() -> str:
-    try:
-        if "app_password" in st.secrets:
-            return str(st.secrets["app_password"]).strip()
-    except FileNotFoundError:
-        pass
-    return os.getenv("APP_PASSWORD", "").strip()
+# ─────────────────────────────────────────────────────────────────────────────
+# Modern Dark Theme CSS
+# ─────────────────────────────────────────────────────────────────────────────
+CUSTOM_CSS = """
+<style>
+    /* Import modern font */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
+    /* Root variables */
+    :root {
+        --bg-primary: #0a0a0f;
+        --bg-secondary: #12121a;
+        --bg-card: rgba(255, 255, 255, 0.03);
+        --bg-card-hover: rgba(255, 255, 255, 0.06);
+        --border-color: rgba(255, 255, 255, 0.08);
+        --text-primary: #ffffff;
+        --text-secondary: rgba(255, 255, 255, 0.7);
+        --text-muted: rgba(255, 255, 255, 0.4);
+        --accent-primary: #6366f1;
+        --accent-secondary: #8b5cf6;
+        --accent-gradient: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+        --success: #22c55e;
+        --warning: #f59e0b;
+        --error: #ef4444;
+        --glass-bg: rgba(255, 255, 255, 0.02);
+        --glass-border: rgba(255, 255, 255, 0.1);
+    }
 
-def ensure_runs_dir() -> None:
-    RUNS_UI_DIR.mkdir(parents=True, exist_ok=True)
+    /* Main container */
+    .stApp {
+        background: var(--bg-primary);
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
 
+    /* Sidebar styling */
+    [data-testid="stSidebar"] {
+        background: var(--bg-secondary);
+        border-right: 1px solid var(--border-color);
+    }
 
-def read_pid(pid_path: Path) -> int | None:
-    try:
-        return int(pid_path.read_text(encoding="utf-8").strip())
-    except (FileNotFoundError, ValueError):
-        return None
+    [data-testid="stSidebar"] .stMarkdown {
+        color: var(--text-secondary);
+    }
 
+    /* Headers */
+    h1, h2, h3 {
+        color: var(--text-primary) !important;
+        font-weight: 600 !important;
+        letter-spacing: -0.02em;
+    }
 
-def is_pid_running(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
+    h1 {
+        font-size: 2rem !important;
+        background: var(--accent-gradient);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+    }
 
+    /* Tab styling */
+    .stTabs [data-baseweb="tab-list"] {
+        background: var(--bg-card);
+        border-radius: 12px;
+        padding: 4px;
+        gap: 4px;
+        border: 1px solid var(--border-color);
+    }
 
-def start_background(args: list[str], pid_path: Path, log_path: Path) -> int:
-    ensure_runs_dir()
-    existing_pid = read_pid(pid_path)
-    if existing_pid and is_pid_running(existing_pid):
-        return existing_pid
+    .stTabs [data-baseweb="tab"] {
+        background: transparent;
+        border-radius: 8px;
+        color: var(--text-secondary);
+        font-weight: 500;
+        padding: 8px 16px;
+        border: none;
+    }
 
-    log_handle = log_path.open("a", encoding="utf-8")
-    kwargs: dict[str, Any] = {"stdout": log_handle, "stderr": log_handle}
-    if os.name == "nt":
-        kwargs["creationflags"] = (
-            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-        )
-    else:
-        kwargs["start_new_session"] = True
-    process = subprocess.Popen(args, **kwargs)
-    log_handle.close()
-    pid_path.write_text(str(process.pid), encoding="utf-8")
-    return process.pid
+    .stTabs [aria-selected="true"] {
+        background: var(--accent-gradient) !important;
+        color: white !important;
+    }
 
+    .stTabs [data-baseweb="tab-panel"] {
+        padding-top: 1.5rem;
+    }
 
-def stop_background(pid_path: Path) -> bool:
-    pid = read_pid(pid_path)
-    if not pid:
-        return False
-    try:
-        if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/F"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        else:
-            os.kill(pid, signal.SIGTERM)
-    except OSError:
-        return False
-    try:
-        pid_path.unlink()
-    except FileNotFoundError:
-        pass
-    return True
+    /* Card styling */
+    .status-card {
+        background: var(--glass-bg);
+        border: 1px solid var(--glass-border);
+        border-radius: 16px;
+        padding: 1.25rem;
+        backdrop-filter: blur(10px);
+        transition: all 0.2s ease;
+    }
 
+    .status-card:hover {
+        background: var(--bg-card-hover);
+        border-color: rgba(255, 255, 255, 0.15);
+    }
 
-def run_agent_once_cli(
-    config_path: Path,
-    test_mode: bool = False,
-    test_minutes: int | None = None,
-) -> tuple[int, str]:
-    args = [
-        sys.executable,
-        "-m",
-        "src.agent",
-        "--config",
-        str(config_path),
-        "--once",
-    ]
-    if test_mode:
-        args.append("--test")
-    if test_minutes:
-        args += ["--test-minutes", str(test_minutes)]
-    result = subprocess.run(args, capture_output=True, text=True, check=False)
-    output = (result.stdout or "").strip()
-    if result.stderr:
-        output = f"{output}\n{result.stderr.strip()}".strip()
-    return result.returncode, output
-def require_password() -> bool:
-    app_password = get_app_password()
-    if not app_password:
-        return True
-    if st.session_state.get("password_ok"):
-        return True
+    .status-card h4 {
+        color: var(--text-muted);
+        font-size: 0.75rem;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 0.5rem;
+    }
 
-    def password_entered() -> None:
-        entered = st.session_state.get("password", "")
-        if hmac.compare_digest(entered, app_password):
-            st.session_state["password_ok"] = True
-            st.session_state["password"] = ""
-        else:
-            st.session_state["password_ok"] = False
+    .status-card .value {
+        color: var(--text-primary);
+        font-size: 1.5rem;
+        font-weight: 600;
+    }
 
-    st.text_input(
-        "App password",
-        type="password",
-        on_change=password_entered,
-        key="password",
-    )
-    if st.session_state.get("password_ok") is False:
-        st.error("Incorrect password.")
-    return st.session_state.get("password_ok", False)
+    .status-running {
+        border-left: 3px solid var(--success);
+    }
 
+    .status-idle {
+        border-left: 3px solid var(--text-muted);
+    }
 
-def load_config() -> dict[str, Any]:
-    if CONFIG_PATH.exists():
-        return yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    if EXAMPLE_CONFIG_PATH.exists():
-        return yaml.safe_load(EXAMPLE_CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    return {}
+    .status-error {
+        border-left: 3px solid var(--error);
+    }
 
+    /* Button styling */
+    .stButton > button {
+        background: var(--accent-gradient);
+        color: white;
+        border: none;
+        border-radius: 10px;
+        padding: 0.6rem 1.25rem;
+        font-weight: 500;
+        font-size: 0.9rem;
+        transition: all 0.2s ease;
+        box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25);
+    }
 
-def save_config(config: dict[str, Any]) -> None:
-    text = yaml.safe_dump(config, sort_keys=False)
-    CONFIG_PATH.write_text(text, encoding="utf-8")
+    .stButton > button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 6px 20px rgba(99, 102, 241, 0.35);
+    }
 
+    .stButton > button:active {
+        transform: translateY(0);
+    }
 
-def cfg(config: dict[str, Any], section: str, key: str, default: Any) -> Any:
-    return config.get(section, {}).get(key, default)
+    /* Secondary button */
+    .secondary-btn > button {
+        background: var(--bg-card) !important;
+        border: 1px solid var(--border-color) !important;
+        box-shadow: none !important;
+    }
 
+    .secondary-btn > button:hover {
+        background: var(--bg-card-hover) !important;
+        border-color: var(--accent-primary) !important;
+    }
 
-def path_for_config(path: Path) -> str:
-    try:
-        return str(path.relative_to(ROOT))
-    except ValueError:
-        return str(path)
+    /* Form inputs */
+    .stTextInput > div > div > input,
+    .stTextArea > div > div > textarea,
+    .stNumberInput > div > div > input,
+    .stSelectbox > div > div {
+        background: var(--bg-card) !important;
+        border: 1px solid var(--border-color) !important;
+        border-radius: 10px !important;
+        color: var(--text-primary) !important;
+        padding: 0.75rem 1rem !important;
+    }
 
+    .stTextInput > div > div > input:focus,
+    .stTextArea > div > div > textarea:focus,
+    .stNumberInput > div > div > input:focus {
+        border-color: var(--accent-primary) !important;
+        box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2) !important;
+    }
 
-def save_uploaded_file(upload, dest_path: Path) -> str:
-    if upload is None:
-        return ""
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    dest_path.write_bytes(upload.getvalue())
-    return path_for_config(dest_path)
+    /* Labels */
+    .stTextInput > label,
+    .stTextArea > label,
+    .stNumberInput > label,
+    .stSelectbox > label,
+    .stCheckbox > label,
+    .stMultiSelect > label {
+        color: var(--text-secondary) !important;
+        font-weight: 500 !important;
+        font-size: 0.875rem !important;
+    }
 
+    /* Checkbox styling */
+    .stCheckbox > label > span {
+        color: var(--text-secondary) !important;
+    }
 
-def split_tags(text: str) -> list[str]:
-    return [tag.strip() for tag in text.split(",") if tag.strip()]
+    /* Expander styling */
+    .streamlit-expanderHeader {
+        background: var(--bg-card) !important;
+        border: 1px solid var(--border-color) !important;
+        border-radius: 12px !important;
+        color: var(--text-primary) !important;
+        font-weight: 500 !important;
+    }
 
-def split_text_lines(text: str) -> list[str]:
-    if not text:
-        return []
-    entries: list[str] = []
-    for line in text.splitlines():
-        entries.extend(line.split(","))
-    return [item.strip() for item in entries if item.strip()]
+    .streamlit-expanderContent {
+        background: var(--bg-card) !important;
+        border: 1px solid var(--border-color) !important;
+        border-top: none !important;
+        border-radius: 0 0 12px 12px !important;
+    }
 
-def select_overlay_text(overlay_text: str, auto_texts: list[str], mode: str) -> str:
-    if overlay_text.strip():
-        return overlay_text.strip()
-    if not auto_texts:
-        return ""
-    mode = mode.strip().lower()
-    if mode == "random":
-        return random.choice(auto_texts)
-    idx = dt.date.today().toordinal() % len(auto_texts)
-    return auto_texts[idx]
+    /* Divider */
+    hr {
+        border-color: var(--border-color) !important;
+        margin: 2rem 0 !important;
+    }
 
-def resolve_path(path_value: str) -> Path:
-    path = Path(path_value).expanduser()
-    if not path.is_absolute():
-        path = ROOT / path
-    return path
+    /* Success/Error/Warning messages */
+    .stSuccess {
+        background: rgba(34, 197, 94, 0.1) !important;
+        border: 1px solid rgba(34, 197, 94, 0.3) !important;
+        border-radius: 10px !important;
+    }
 
-def apply_preset(config: dict[str, Any], preset: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    for section, values in preset.items():
-        section_map = config.setdefault(section, {})
-        section_map.update(values)
-    return config
+    .stError {
+        background: rgba(239, 68, 68, 0.1) !important;
+        border: 1px solid rgba(239, 68, 68, 0.3) !important;
+        border-radius: 10px !important;
+    }
 
+    .stWarning {
+        background: rgba(245, 158, 11, 0.1) !important;
+        border: 1px solid rgba(245, 158, 11, 0.3) !important;
+        border-radius: 10px !important;
+    }
+
+    .stInfo {
+        background: rgba(99, 102, 241, 0.1) !important;
+        border: 1px solid rgba(99, 102, 241, 0.3) !important;
+        border-radius: 10px !important;
+    }
+
+    /* Metric styling */
+    [data-testid="stMetricValue"] {
+        color: var(--text-primary) !important;
+        font-weight: 600 !important;
+    }
+
+    [data-testid="stMetricLabel"] {
+        color: var(--text-muted) !important;
+    }
+
+    /* Code blocks */
+    code {
+        background: var(--bg-card) !important;
+        border: 1px solid var(--border-color) !important;
+        border-radius: 6px !important;
+        color: var(--accent-secondary) !important;
+        padding: 0.2rem 0.4rem !important;
+    }
+
+    pre {
+        background: var(--bg-card) !important;
+        border: 1px solid var(--border-color) !important;
+        border-radius: 12px !important;
+    }
+
+    /* Caption styling */
+    .stCaption {
+        color: var(--text-muted) !important;
+    }
+
+    /* File uploader */
+    [data-testid="stFileUploader"] {
+        background: var(--bg-card) !important;
+        border: 1px dashed var(--border-color) !important;
+        border-radius: 12px !important;
+        padding: 1rem !important;
+    }
+
+    /* Multiselect */
+    .stMultiSelect > div > div {
+        background: var(--bg-card) !important;
+        border: 1px solid var(--border-color) !important;
+        border-radius: 10px !important;
+    }
+
+    /* Progress bar */
+    .stProgress > div > div {
+        background: var(--accent-gradient) !important;
+        border-radius: 10px !important;
+    }
+
+    /* Hide Streamlit branding */
+    #MainMenu, footer, header {
+        visibility: hidden;
+    }
+
+    /* Custom scrollbar */
+    ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+        background: var(--bg-secondary);
+    }
+
+    ::-webkit-scrollbar-thumb {
+        background: var(--border-color);
+        border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+        background: rgba(255, 255, 255, 0.2);
+    }
+
+    /* Animation for status indicators */
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+    }
+
+    .pulse {
+        animation: pulse 2s infinite;
+    }
+
+    /* Quick action grid */
+    .action-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 0.75rem;
+    }
+</style>
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Presets
+# ─────────────────────────────────────────────────────────────────────────────
 PRESETS: dict[str, dict[str, dict[str, Any]]] = {
     "Cafe Steam": {
         "visuals": {
@@ -256,1029 +418,1319 @@ PRESETS: dict[str, dict[str, dict[str, Any]]] = {
                 "New mix daily."
             ),
             "tags": [
-                "cafe ambience",
-                "coffee shop ambience",
-                "study music",
-                "focus music",
-                "relaxing mix",
-                "lofi",
-                "chill beats",
-                "background music",
-                "sleep music",
+                "cafe ambience", "coffee shop ambience", "study music",
+                "focus music", "relaxing mix", "lofi", "chill beats",
+                "background music", "sleep music",
             ],
             "category_id": "10",
         },
     },
+    "Fireplace Lounge": {
+        "visuals": {
+            "image_provider": "openai",
+            "image_prompt": (
+                "cozy fireplace living room, warm glow, winter evening, "
+                "empty center space for text, high detail, cinematic"
+            ),
+            "loop_motion_style": "smooth",
+            "loop_effects": ["flicker", "vignette"],
+            "loop_flicker_amount": 0.02,
+        },
+        "text_overlay": {
+            "auto_texts": ["RELAX", "UNWIND", "REST"],
+            "auto_mode": "daily",
+        },
+        "upload": {
+            "title_template": "Fireplace Lounge - Cozy Evening Mix - {date}",
+            "tags": ["fireplace", "cozy", "relaxing", "evening", "ambient"],
+        },
+    },
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Utility Functions
+# ─────────────────────────────────────────────────────────────────────────────
 
-def main() -> None:
-    st.set_page_config(
-        page_title="Video Creator Agent",
-        page_icon=":movie_camera:",
-        layout="centered",
+def get_app_password() -> str:
+    try:
+        if "app_password" in st.secrets:
+            return str(st.secrets["app_password"]).strip()
+    except FileNotFoundError:
+        pass
+    return os.getenv("APP_PASSWORD", "").strip()
+
+
+def ensure_runs_dir() -> None:
+    RUNS_UI_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def read_pid(pid_path: Path) -> int | None:
+    try:
+        return int(pid_path.read_text(encoding="utf-8").strip())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def is_pid_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def get_job_status(pid_path: Path) -> tuple[bool, int | None]:
+    """Returns (is_running, pid)"""
+    pid = read_pid(pid_path)
+    if pid and is_pid_running(pid):
+        return True, pid
+    return False, None
+
+
+def start_background(args: list[str], pid_path: Path, log_path: Path) -> int:
+    ensure_runs_dir()
+    existing_pid = read_pid(pid_path)
+    if existing_pid and is_pid_running(existing_pid):
+        return existing_pid
+
+    log_handle = log_path.open("a", encoding="utf-8")
+    kwargs: dict[str, Any] = {"stdout": log_handle, "stderr": log_handle}
+    if os.name == "nt":
+        kwargs["creationflags"] = (
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        )
+    else:
+        kwargs["start_new_session"] = True
+    process = subprocess.Popen(args, **kwargs)
+    log_handle.close()
+    pid_path.write_text(str(process.pid), encoding="utf-8")
+    return process.pid
+
+
+def stop_background(pid_path: Path) -> bool:
+    pid = read_pid(pid_path)
+    if not pid:
+        return False
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/F"],
+                capture_output=True, text=True, check=False,
+            )
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return False
+    try:
+        pid_path.unlink()
+    except FileNotFoundError:
+        pass
+    return True
+
+
+def run_agent_once_cli(
+    config_path: Path,
+    test_mode: bool = False,
+    test_minutes: int | None = None,
+) -> tuple[int, str]:
+    args = [sys.executable, "-m", "src.agent", "--config", str(config_path), "--once"]
+    if test_mode:
+        args.append("--test")
+    if test_minutes:
+        args += ["--test-minutes", str(test_minutes)]
+    result = subprocess.run(args, capture_output=True, text=True, check=False)
+    output = (result.stdout or "").strip()
+    if result.stderr:
+        output = f"{output}\n{result.stderr.strip()}".strip()
+    return result.returncode, output
+
+
+def require_password() -> bool:
+    app_password = get_app_password()
+    if not app_password:
+        return True
+    if st.session_state.get("password_ok"):
+        return True
+
+    def password_entered() -> None:
+        entered = st.session_state.get("password", "")
+        if hmac.compare_digest(entered, app_password):
+            st.session_state["password_ok"] = True
+            st.session_state["password"] = ""
+        else:
+            st.session_state["password_ok"] = False
+
+    st.markdown("### Enter Password")
+    st.text_input(
+        "App password",
+        type="password",
+        on_change=password_entered,
+        key="password",
+        label_visibility="collapsed",
     )
-    st.title("Video Creator Agent")
-    if not require_password():
-        st.stop()
-    st.caption("Fill out the settings, save config, then run or schedule.")
+    if st.session_state.get("password_ok") is False:
+        st.error("Incorrect password")
+    return st.session_state.get("password_ok", False)
+
+
+def load_config() -> dict[str, Any]:
+    if CONFIG_PATH.exists():
+        return yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    if EXAMPLE_CONFIG_PATH.exists():
+        return yaml.safe_load(EXAMPLE_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    return {}
+
+
+def save_config(config: dict[str, Any]) -> None:
+    text = yaml.safe_dump(config, sort_keys=False)
+    CONFIG_PATH.write_text(text, encoding="utf-8")
+
+
+def cfg(config: dict[str, Any], section: str, key: str, default: Any) -> Any:
+    return config.get(section, {}).get(key, default)
+
+
+def path_for_config(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def save_uploaded_file(upload, dest_path: Path) -> str:
+    if upload is None:
+        return ""
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    dest_path.write_bytes(upload.getvalue())
+    return path_for_config(dest_path)
+
+
+def split_tags(text: str) -> list[str]:
+    return [tag.strip() for tag in text.split(",") if tag.strip()]
+
+
+def split_text_lines(text: str) -> list[str]:
+    if not text:
+        return []
+    entries: list[str] = []
+    for line in text.splitlines():
+        entries.extend(line.split(","))
+    return [item.strip() for item in entries if item.strip()]
+
+
+def select_overlay_text(overlay_text: str, auto_texts: list[str], mode: str) -> str:
+    if overlay_text.strip():
+        return overlay_text.strip()
+    if not auto_texts:
+        return ""
+    mode = mode.strip().lower()
+    if mode == "random":
+        return random.choice(auto_texts)
+    idx = dt.date.today().toordinal() % len(auto_texts)
+    return auto_texts[idx]
+
+
+def resolve_path(path_value: str) -> Path:
+    path = Path(path_value).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    return path
+
+
+def safe_float(value: Any, default: float) -> float:
+    """Safely convert a value to float, supporting PI expressions."""
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return default
+        try:
+            return float(text)
+        except ValueError:
+            pass
+        normalized = re.sub(r"\s+", "", text).upper()
+        if normalized == "PI":
+            return math.pi
+        match = re.match(r"^PI([/*])([0-9.]+)$", normalized)
+        if match:
+            op, num_str = match.groups()
+            try:
+                number = float(num_str)
+            except ValueError:
+                return default
+            return math.pi / number if op == "/" else math.pi * number
+        match = re.match(r"^([0-9.]+)([/*])PI$", normalized)
+        if match:
+            num_str, op = match.groups()
+            try:
+                number = float(num_str)
+            except ValueError:
+                return default
+            return number / math.pi if op == "/" else number * math.pi
+    return default
+
+
+def apply_preset(config: dict[str, Any], preset: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    for section, values in preset.items():
+        section_map = config.setdefault(section, {})
+        section_map.update(values)
+    return config
+
+
+def get_recent_runs() -> list[Path]:
+    """Get list of recent run directories"""
+    runs_dir = ROOT / "runs"
+    if not runs_dir.exists():
+        return []
+    dirs = [d for d in runs_dir.iterdir() if d.is_dir() and d.name != "_ui" and d.name != "_preview"]
+    return sorted(dirs, key=lambda x: x.stat().st_mtime, reverse=True)[:5]
+
+
+def get_log_tail(log_path: Path, lines: int = 20) -> str:
+    """Get last N lines of a log file"""
+    if not log_path.exists():
+        return ""
+    try:
+        content = log_path.read_text(encoding="utf-8", errors="ignore")
+        return "\n".join(content.splitlines()[-lines:])
+    except Exception:
+        return ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UI Components
+# ─────────────────────────────────────────────────────────────────────────────
+
+def render_status_card(title: str, value: str, status: str = "idle") -> None:
+    """Render a status card with title, value, and status indicator"""
+    status_class = f"status-{status}"
+    st.markdown(f"""
+        <div class="status-card {status_class}">
+            <h4>{title}</h4>
+            <div class="value">{value}</div>
+        </div>
+    """, unsafe_allow_html=True)
+
+
+def render_sidebar(config: dict[str, Any], demo_mode: bool) -> dict[str, bool]:
+    """Render the sidebar with status and controls. Returns action flags."""
+    actions = {
+        "run_test": False,
+        "run_full": False,
+        "stop_full": False,
+        "start_schedule": False,
+        "stop_schedule": False,
+    }
+
+    st.sidebar.markdown("## Controls")
+
+    # Status indicators
+    full_running, full_pid = get_job_status(FULLRUN_PID_PATH)
+    sched_running, sched_pid = get_job_status(SCHEDULE_PID_PATH)
+
+    # Full run status
+    if full_running:
+        st.sidebar.markdown(f"""
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 1rem;">
+                <span style="width: 8px; height: 8px; background: #22c55e; border-radius: 50%; display: inline-block;" class="pulse"></span>
+                <span style="color: #22c55e; font-weight: 500;">Full Run Active</span>
+                <span style="color: rgba(255,255,255,0.4); font-size: 0.8rem;">PID {full_pid}</span>
+            </div>
+        """, unsafe_allow_html=True)
+
+    # Schedule status
+    if sched_running:
+        daily_time = cfg(config, "schedule", "daily_time", "03:00")
+        st.sidebar.markdown(f"""
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 1rem;">
+                <span style="width: 8px; height: 8px; background: #6366f1; border-radius: 50%; display: inline-block;" class="pulse"></span>
+                <span style="color: #8b5cf6; font-weight: 500;">Scheduled @ {daily_time}</span>
+            </div>
+        """, unsafe_allow_html=True)
+
+    st.sidebar.markdown("---")
+
+    # Quick actions
+    st.sidebar.markdown("### Quick Actions")
+
+    col1, col2 = st.sidebar.columns(2)
+
+    with col1:
+        if st.button("Test Run", disabled=demo_mode, use_container_width=True, key="sidebar_test"):
+            actions["run_test"] = True
+
+    with col2:
+        if full_running:
+            if st.button("Stop", disabled=demo_mode, use_container_width=True, key="sidebar_stop_full"):
+                actions["stop_full"] = True
+        else:
+            if st.button("Full Run", disabled=demo_mode, use_container_width=True, key="sidebar_full"):
+                actions["run_full"] = True
+
+    # Schedule control
+    st.sidebar.markdown("### Schedule")
+    if sched_running:
+        if st.sidebar.button("Stop Schedule", disabled=demo_mode, use_container_width=True, key="sidebar_stop_sched"):
+            actions["stop_schedule"] = True
+    else:
+        if st.sidebar.button("Start Schedule", disabled=demo_mode, use_container_width=True, key="sidebar_start_sched"):
+            actions["start_schedule"] = True
+
+    st.sidebar.markdown("---")
+
+    # Demo mode toggle
     demo_mode = st.sidebar.checkbox(
-        "Demo mode (preview only)",
-        value=os.getenv("DEMO_MODE") == "1",
+        "Demo mode",
+        value=demo_mode,
+        help="Preview only - no saving or running"
     )
     if demo_mode:
-        st.sidebar.info("Saving is disabled in demo mode.")
+        st.sidebar.info("Saving is disabled")
 
-    if "config" not in st.session_state:
-        st.session_state.config = load_config()
+    st.sidebar.markdown("---")
+    st.sidebar.caption(f"Today: {dt.date.today().isoformat()}")
 
-    config = st.session_state.config
-    st.subheader("Quick presets")
-    preset_choice = st.selectbox(
-        "Preset",
-        ["None"] + sorted(PRESETS.keys()),
+    return actions
+
+
+def render_dashboard_tab(config: dict[str, Any]) -> None:
+    """Render the dashboard/overview tab"""
+
+    # Status cards row
+    col1, col2, col3 = st.columns(3)
+
+    full_running, _ = get_job_status(FULLRUN_PID_PATH)
+    sched_running, _ = get_job_status(SCHEDULE_PID_PATH)
+
+    with col1:
+        status = "running" if full_running else "idle"
+        value = "Running" if full_running else "Idle"
+        render_status_card("Full Run", value, status)
+
+    with col2:
+        status = "running" if sched_running else "idle"
+        value = cfg(config, "schedule", "daily_time", "03:00") if sched_running else "Off"
+        render_status_card("Schedule", value, status)
+
+    with col3:
+        recent = get_recent_runs()
+        if recent:
+            last_run = recent[0].name
+            render_status_card("Last Run", last_run[:10], "idle")
+        else:
+            render_status_card("Last Run", "None", "idle")
+
+    st.markdown("---")
+
+    # Quick config summary
+    st.markdown("### Current Configuration")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("**Audio**")
+        source = cfg(config, "audio", "source", "local")
+        if source == "local":
+            folder = cfg(config, "audio", "local_folder", "Not set")
+            st.caption(f"Local: `{folder}`")
+        else:
+            folder_id = cfg(config, "audio", "drive_folder_id", "Not set")
+            st.caption(f"Drive: `{folder_id[:20]}...`" if len(str(folder_id)) > 20 else f"Drive: `{folder_id}`")
+
+        hours_min = cfg(config, "audio", "target_hours_min", 8)
+        hours_max = cfg(config, "audio", "target_hours_max", 9)
+        st.caption(f"Duration: {hours_min}-{hours_max} hours")
+
+    with col2:
+        st.markdown("**Visuals**")
+        image_provider = cfg(config, "visuals", "image_provider", "openai")
+        loop_provider = cfg(config, "visuals", "loop_provider", "ffmpeg")
+        st.caption(f"Image: {image_provider}")
+        st.caption(f"Loop: {loop_provider}")
+
+        effects = cfg(config, "visuals", "loop_effects", [])
+        if effects:
+            st.caption(f"Effects: {', '.join(effects)}")
+
+    st.markdown("---")
+
+    # Recent runs
+    st.markdown("### Recent Runs")
+    recent = get_recent_runs()
+    if recent:
+        for run_dir in recent[:5]:
+            output_files = list(run_dir.glob("*.mp4"))
+            status_icon = "" if output_files else ""
+            st.markdown(f"`{run_dir.name}` {status_icon}")
+    else:
+        st.caption("No runs yet")
+
+    # Logs viewer
+    if full_running or FULLRUN_LOG_PATH.exists():
+        with st.expander("View Full Run Log"):
+            log_content = get_log_tail(FULLRUN_LOG_PATH, 30)
+            if log_content:
+                st.code(log_content, language="text")
+            else:
+                st.caption("No log content")
+
+    if sched_running or SCHEDULE_LOG_PATH.exists():
+        with st.expander("View Schedule Log"):
+            log_content = get_log_tail(SCHEDULE_LOG_PATH, 30)
+            if log_content:
+                st.code(log_content, language="text")
+            else:
+                st.caption("No log content")
+
+
+def render_audio_tab(config: dict[str, Any]) -> dict[str, Any]:
+    """Render audio configuration tab"""
+    audio_config = {}
+
+    st.markdown("### Audio Source")
+
+    audio_source_label = st.selectbox(
+        "Source",
+        ["Local folder", "Google Drive"],
+        index=0 if cfg(config, "audio", "source", "drive") == "local" else 1,
     )
-    if st.button("Apply preset"):
-        if preset_choice == "None":
-            st.info("Select a preset to apply.")
-        else:
-            st.session_state.config = apply_preset(
-                st.session_state.config,
-                PRESETS[preset_choice],
-            )
-            st.success("Preset applied. You can tweak fields below.")
+    audio_config["source"] = "local" if audio_source_label == "Local folder" else "drive"
 
-    with st.form("config_form"):
-        st.subheader("Project")
-        project_name = st.text_input(
-            "Project name",
-            cfg(config, "project", "name", "daily_chill_mix"),
-        )
-        output_dir = st.text_input(
-            "Output folder",
-            cfg(config, "project", "output_dir", "runs"),
-        )
+    if audio_config["source"] == "local":
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            audio_config["local_folder"] = st.text_input(
+                "Folder path",
+                cfg(config, "audio", "local_folder", ""),
+                placeholder="C:\\Users\\Music or /home/user/music"
+            )
+        with col2:
+            audio_config["recursive"] = st.checkbox(
+                "Recursive",
+                value=bool(cfg(config, "audio", "recursive", False)),
+                help="Scan subfolders"
+            )
 
-        st.subheader("Audio")
-        audio_source_label = st.selectbox(
-            "Audio source",
-            ["Local folder", "Google Drive"],
-            index=0 if cfg(config, "audio", "source", "drive") == "local" else 1,
+        audio_config["uploaded_files"] = st.file_uploader(
+            "Or upload MP3 files",
+            type=["mp3"],
+            accept_multiple_files=True,
         )
-        st.caption("YouTube audio downloads are not supported. Use local files or Drive.")
-        audio_source = "local" if audio_source_label == "Local folder" else "drive"
-        drive_folder_id = cfg(config, "audio", "drive_folder_id", "")
-        local_folder = cfg(config, "audio", "local_folder", "")
-        recursive = bool(cfg(config, "audio", "recursive", False))
-        uploaded_audio_files = []
-        if audio_source == "local":
-            local_folder = st.text_input(
-                "Local folder path (MP3s)",
-                local_folder or "C:\\Users\\USERNAME\\Music",
-            )
-            recursive = st.checkbox("Scan subfolders", value=recursive)
-            uploaded_audio_files = st.file_uploader(
-                "Upload MP3 files (optional)",
-                type=["mp3"],
-                accept_multiple_files=True,
-            )
-            if uploaded_audio_files:
-                st.caption("Uploaded files override the folder path for this run.")
-        else:
-            drive_folder_id = st.text_input(
-                "Google Drive folder ID (MP3s)",
-                drive_folder_id,
-            )
-        ordering = st.selectbox(
+    else:
+        audio_config["drive_folder_id"] = st.text_input(
+            "Google Drive folder ID",
+            cfg(config, "audio", "drive_folder_id", ""),
+            help="The ID from the Drive folder URL"
+        )
+        audio_config["local_folder"] = cfg(config, "audio", "local_folder", "")
+        audio_config["recursive"] = cfg(config, "audio", "recursive", False)
+        audio_config["uploaded_files"] = []
+
+    st.markdown("### Playlist Settings")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        audio_config["ordering"] = st.selectbox(
             "Ordering",
             ["name", "modifiedTime"],
             index=0 if cfg(config, "audio", "ordering", "name") == "name" else 1,
         )
-        repeat_playlist = st.checkbox(
-            "Repeat playlist to hit target hours",
+    with col2:
+        audio_config["repeat_playlist"] = st.checkbox(
+            "Repeat to fill duration",
             value=bool(cfg(config, "audio", "repeat_playlist", True)),
         )
-        target_hours_min = st.number_input(
-            "Target hours minimum",
-            min_value=0,
-            max_value=24,
+
+    col1, col2 = st.columns(2)
+    with col1:
+        audio_config["target_hours_min"] = st.number_input(
+            "Min hours",
+            min_value=0, max_value=24,
             value=int(cfg(config, "audio", "target_hours_min", 8)),
-            disabled=not repeat_playlist,
+            disabled=not audio_config["repeat_playlist"],
         )
-        target_hours_max = st.number_input(
-            "Target hours maximum",
-            min_value=0,
-            max_value=24,
+    with col2:
+        audio_config["target_hours_max"] = st.number_input(
+            "Max hours",
+            min_value=0, max_value=24,
             value=int(cfg(config, "audio", "target_hours_max", 9)),
-            disabled=not repeat_playlist,
-        )
-        concat_quality = st.number_input(
-            "MP3 quality (0 best - 9 worst)",
-            min_value=0,
-            max_value=9,
-            value=int(cfg(config, "audio", "concat_quality", 2)),
-        )
-        concat_bitrate = st.text_input(
-            "MP3 bitrate (optional, e.g. 192k)",
-            cfg(config, "audio", "concat_bitrate", "") or "",
+            disabled=not audio_config["repeat_playlist"],
         )
 
-        use_service_account = bool(cfg(config, "drive", "use_service_account", True))
-        service_account_path = cfg(
-            config,
-            "drive",
-            "service_account_json",
-            "secrets/drive_service_account.json",
-        )
-        oauth_client_path = cfg(
-            config,
-            "drive",
-            "oauth_client_json",
-            "secrets/drive_oauth_client.json",
-        )
-        drive_token_path = cfg(
-            config,
-            "drive",
-            "token_json",
-            "secrets/drive_token.json",
-        )
-        upload_sa = None
-        upload_oauth = None
-        if audio_source == "drive":
-            st.subheader("Drive")
-            use_service_account = st.checkbox(
+    with st.expander("Audio Quality"):
+        col1, col2 = st.columns(2)
+        with col1:
+            audio_config["concat_quality"] = st.number_input(
+                "Quality (0=best, 9=worst)",
+                min_value=0, max_value=9,
+                value=int(cfg(config, "audio", "concat_quality", 2)),
+            )
+        with col2:
+            audio_config["concat_bitrate"] = st.text_input(
+                "Bitrate (optional)",
+                cfg(config, "audio", "concat_bitrate", "") or "",
+                placeholder="192k"
+            )
+
+    # Drive credentials (only if Drive source)
+    if audio_config["source"] == "drive":
+        with st.expander("Drive Credentials"):
+            audio_config["use_service_account"] = st.checkbox(
                 "Use service account",
-                value=use_service_account,
+                value=bool(cfg(config, "drive", "use_service_account", True)),
             )
-            if use_service_account:
-                service_account_path = st.text_input(
+            if audio_config["use_service_account"]:
+                audio_config["service_account_json"] = st.text_input(
                     "Service account JSON path",
-                    service_account_path,
+                    cfg(config, "drive", "service_account_json", "secrets/drive_service_account.json"),
                 )
-                upload_sa = st.file_uploader("Upload service account JSON", type=["json"])
+                audio_config["upload_sa"] = st.file_uploader("Upload service account JSON", type=["json"])
             else:
-                oauth_client_path = st.text_input(
-                    "Drive OAuth client JSON path",
-                    oauth_client_path,
+                audio_config["oauth_client_json"] = st.text_input(
+                    "OAuth client JSON path",
+                    cfg(config, "drive", "oauth_client_json", "secrets/drive_oauth_client.json"),
                 )
-                upload_oauth = st.file_uploader(
-                    "Upload Drive OAuth client JSON",
-                    type=["json"],
+                audio_config["token_json"] = st.text_input(
+                    "Token JSON path",
+                    cfg(config, "drive", "token_json", "secrets/drive_token.json"),
                 )
-                drive_token_path = st.text_input(
-                    "Drive token JSON path (created on first auth)",
-                    drive_token_path,
-                )
+                audio_config["upload_oauth"] = st.file_uploader("Upload OAuth client JSON", type=["json"])
 
-        st.subheader("Visuals")
-        auto_background = st.checkbox(
-            "Auto-generate background (no Whisk needed)",
+    return audio_config
+
+
+def render_visuals_tab(config: dict[str, Any]) -> dict[str, Any]:
+    """Render visuals configuration tab"""
+    visuals = {}
+
+    # Image source
+    st.markdown("### Image")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        visuals["auto_background"] = st.checkbox(
+            "Auto-generate background",
             value=bool(cfg(config, "visuals", "auto_background", False)),
+            help="Generate solid color background"
         )
-        background_color = cfg(config, "visuals", "background_color", "black")
-        if auto_background:
-            background_color = st.text_input("Background color", background_color)
-        image_provider = cfg(config, "visuals", "image_provider", "whisk")
-        image_provider = st.selectbox(
-            "Image generator (if no image path is provided)",
-            ["whisk", "openai"],
-            index=0 if image_provider == "whisk" else 1,
-        )
-        openai_api_key_env = cfg(config, "visuals", "openai_api_key_env", "OPENAI_API_KEY")
-        openai_model = cfg(config, "visuals", "openai_model", "gpt-image-1")
-        openai_size = cfg(config, "visuals", "openai_size", "1792x1024")
-        openai_quality = cfg(config, "visuals", "openai_quality", "")
-        openai_style = cfg(config, "visuals", "openai_style", "")
-        openai_base_url = cfg(
-            config,
-            "visuals",
-            "openai_base_url",
-            "https://api.openai.com/v1/images/generations",
-        )
-        if image_provider == "openai":
-            openai_api_key_env = st.text_input("OpenAI API key env var", openai_api_key_env)
-            openai_model = st.text_input("OpenAI image model", openai_model)
-            openai_size = st.selectbox(
-                "OpenAI image size",
-                ["1792x1024", "1024x1024", "1024x1792"],
-                index=["1792x1024", "1024x1024", "1024x1792"].index(
-                    openai_size if openai_size in {"1792x1024", "1024x1024", "1024x1792"} else "1792x1024"
-                ),
+    with col2:
+        if visuals["auto_background"]:
+            visuals["background_color"] = st.text_input(
+                "Background color",
+                cfg(config, "visuals", "background_color", "black"),
             )
-            openai_quality = st.text_input(
-                "OpenAI quality (optional)",
-                openai_quality or "",
-            )
-            openai_style = st.text_input(
-                "OpenAI style (optional)",
-                openai_style or "",
-            )
-            openai_base_url = st.text_input(
-                "OpenAI base URL (optional)",
-                openai_base_url,
-            )
-        image_path = st.text_input(
-            "Existing image path (leave blank to generate)",
+
+    if not visuals["auto_background"]:
+        visuals["image_path"] = st.text_input(
+            "Image path (leave blank to generate)",
             cfg(config, "visuals", "image_path", "") or "",
         )
-        upload_image = st.file_uploader("Upload image (optional)", type=["png", "jpg", "jpeg"])
-        if not image_path and not auto_background:
-            image_prompt = st.text_input(
-                "Image prompt",
-                cfg(
-                    config,
-                    "visuals",
-                    "image_prompt",
-                    "cozy coffee shop interior, warm light, cinematic, empty space for text, high detail",
-                ),
-            )
-        else:
-            image_prompt = cfg(config, "visuals", "image_prompt", "")
-        st.caption("Tip: leave empty space for overlay text. You can use {overlay_text} and {date}.")
+        visuals["upload_image"] = st.file_uploader("Or upload image", type=["png", "jpg", "jpeg"])
 
-        loop_video_path = st.text_input(
-            "Existing loop video path (leave blank to generate)",
-            cfg(config, "visuals", "loop_video_path", "") or "",
-        )
-        upload_loop = st.file_uploader("Upload loop video (optional)", type=["mp4", "mov"])
-        loop_provider = st.selectbox(
-            "Loop generator (if no loop video is provided)",
+        if not visuals.get("image_path"):
+            visuals["image_provider"] = st.selectbox(
+                "Image generator",
+                ["openai", "whisk"],
+                index=0 if cfg(config, "visuals", "image_provider", "openai") == "openai" else 1,
+            )
+            visuals["image_prompt"] = st.text_area(
+                "Image prompt",
+                cfg(config, "visuals", "image_prompt", "cozy coffee shop interior, warm light, cinematic"),
+                height=80,
+            )
+            st.caption("Use `{overlay_text}` and `{date}` as placeholders")
+
+            if visuals["image_provider"] == "openai":
+                with st.expander("OpenAI Settings"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        visuals["openai_model"] = st.text_input(
+                            "Model",
+                            cfg(config, "visuals", "openai_model", "gpt-image-1"),
+                        )
+                    with col2:
+                        visuals["openai_size"] = st.selectbox(
+                            "Size",
+                            ["1792x1024", "1024x1024", "1024x1792"],
+                            index=0,
+                        )
+
+    st.markdown("---")
+
+    # Loop video
+    st.markdown("### Loop Video")
+
+    visuals["loop_video_path"] = st.text_input(
+        "Loop video path (leave blank to generate)",
+        cfg(config, "visuals", "loop_video_path", "") or "",
+    )
+    visuals["upload_loop"] = st.file_uploader("Or upload loop video", type=["mp4", "mov"])
+
+    if not visuals.get("loop_video_path"):
+        visuals["loop_provider"] = st.selectbox(
+            "Loop generator",
             ["ffmpeg", "grok"],
             index=0 if cfg(config, "visuals", "loop_provider", "ffmpeg") == "ffmpeg" else 1,
         )
-        loop_zoom_amount = float(cfg(config, "visuals", "loop_zoom_amount", 0.02))
-        loop_pan_amount = float(cfg(config, "visuals", "loop_pan_amount", 0.15))
-        loop_motion_style = cfg(config, "visuals", "loop_motion_style", "cinematic")
-        if not loop_video_path and loop_provider == "grok":
-            video_prompt = st.text_input(
-                "Grok video prompt",
-                cfg(
-                    config,
-                    "visuals",
-                    "video_prompt",
-                    "subtle fire animation, gentle embers drifting, loopable, 5s",
-                ),
-            )
-        else:
-            video_prompt = cfg(config, "visuals", "video_prompt", "")
-        if loop_provider == "ffmpeg":
-            loop_zoom_amount = st.number_input(
-                "Loop zoom amount (subtle motion)",
-                min_value=0.0,
-                max_value=0.2,
-                value=float(loop_zoom_amount),
-                step=0.005,
-            )
-            loop_pan_amount = st.number_input(
-                "Loop pan amount (0 = no pan)",
-                min_value=0.0,
-                max_value=1.0,
-                value=float(loop_pan_amount),
-                step=0.05,
-            )
-            loop_motion_style = st.selectbox(
-                "Motion style",
-                ["smooth", "cinematic", "orbit"],
-                index=["smooth", "cinematic", "orbit"].index(
-                    loop_motion_style if loop_motion_style in {"smooth", "cinematic", "orbit"} else "cinematic"
-                ),
-            )
+
+        if visuals["loop_provider"] == "ffmpeg":
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                visuals["loop_duration_seconds"] = st.number_input(
+                    "Duration (sec)",
+                    min_value=1, max_value=30,
+                    value=int(cfg(config, "visuals", "loop_duration_seconds", 5)),
+                )
+            with col2:
+                visuals["fps"] = st.number_input(
+                    "FPS",
+                    min_value=1, max_value=60,
+                    value=int(cfg(config, "visuals", "fps", 30)),
+                )
+            with col3:
+                visuals["loop_motion_style"] = st.selectbox(
+                    "Motion style",
+                    ["smooth", "cinematic", "orbit"],
+                    index=1,
+                )
+
+            col1, col2 = st.columns(2)
+            with col1:
+                visuals["loop_zoom_amount"] = st.slider(
+                    "Zoom amount",
+                    min_value=0.0, max_value=0.1, step=0.005,
+                    value=float(cfg(config, "visuals", "loop_zoom_amount", 0.02)),
+                )
+            with col2:
+                visuals["loop_pan_amount"] = st.slider(
+                    "Pan amount",
+                    min_value=0.0, max_value=0.5, step=0.05,
+                    value=float(cfg(config, "visuals", "loop_pan_amount", 0.15)),
+                )
+
+            # Effects
             effect_options = ["steam", "sway", "flicker", "color_drift", "vignette"]
-            effect_labels = {
-                "steam": "Steam drift",
-                "sway": "Sway (rotation)",
-                "flicker": "Flicker (brightness)",
-                "color_drift": "Color drift (hue)",
-                "vignette": "Vignette (edge darken)",
-            }
-            default_effects = cfg(
-                config,
-                "visuals",
-                "loop_effects",
-                ["flicker", "vignette"],
-            )
+            default_effects = cfg(config, "visuals", "loop_effects", ["flicker", "vignette"])
             if isinstance(default_effects, str):
-                default_effects = [
-                    item.strip() for item in default_effects.split(",") if item.strip()
-                ]
-            loop_effects = st.multiselect(
-                "Extra loop effects",
+                default_effects = [e.strip() for e in default_effects.split(",") if e.strip()]
+
+            visuals["loop_effects"] = st.multiselect(
+                "Effects",
                 options=effect_options,
-                default=[effect for effect in default_effects if effect in effect_options],
-                format_func=lambda key: effect_labels.get(key, key),
+                default=[e for e in default_effects if e in effect_options],
             )
-            loop_sway_degrees = float(cfg(config, "visuals", "loop_sway_degrees", 0.35))
-            loop_flicker_amount = float(
-                cfg(config, "visuals", "loop_flicker_amount", 0.015)
-            )
-            loop_hue_degrees = float(cfg(config, "visuals", "loop_hue_degrees", 0.0))
-            loop_steam_opacity = float(cfg(config, "visuals", "loop_steam_opacity", 0.08))
-            loop_steam_blur = float(cfg(config, "visuals", "loop_steam_blur", 10.0))
-            loop_steam_noise = int(cfg(config, "visuals", "loop_steam_noise", 12))
-            loop_steam_drift_x = float(cfg(config, "visuals", "loop_steam_drift_x", 0.02))
-            loop_steam_drift_y = float(cfg(config, "visuals", "loop_steam_drift_y", 0.05))
-            vignette_default = cfg(config, "visuals", "loop_vignette_angle", 0.63)
-            try:
-                loop_vignette_angle = float(vignette_default)
-            except (TypeError, ValueError):
-                loop_vignette_angle = 0.63
-            if "steam" in loop_effects:
-                loop_steam_opacity = st.number_input(
-                    "Steam opacity",
-                    min_value=0.0,
-                    max_value=0.2,
-                    value=float(loop_steam_opacity),
-                    step=0.01,
-                )
-                loop_steam_blur = st.number_input(
-                    "Steam blur",
-                    min_value=0.0,
-                    max_value=30.0,
-                    value=float(loop_steam_blur),
-                    step=1.0,
-                )
-                loop_steam_noise = st.number_input(
-                    "Steam noise",
-                    min_value=0,
-                    max_value=40,
-                    value=int(loop_steam_noise),
-                    step=1,
-                )
-                loop_steam_drift_x = st.number_input(
-                    "Steam drift X",
-                    min_value=0.0,
-                    max_value=0.1,
-                    value=float(loop_steam_drift_x),
-                    step=0.005,
-                )
-                loop_steam_drift_y = st.number_input(
-                    "Steam drift Y",
-                    min_value=0.0,
-                    max_value=0.2,
-                    value=float(loop_steam_drift_y),
-                    step=0.01,
-                )
-            if "sway" in loop_effects:
-                loop_sway_degrees = st.number_input(
-                    "Sway degrees (rotation)",
-                    min_value=0.0,
-                    max_value=2.0,
-                    value=float(loop_sway_degrees),
-                    step=0.05,
-                )
-            if "flicker" in loop_effects:
-                loop_flicker_amount = st.number_input(
+
+            # Effect-specific settings
+            if "steam" in visuals["loop_effects"]:
+                with st.expander("Steam Settings"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        visuals["loop_steam_opacity"] = st.slider("Opacity", 0.0, 0.2, float(cfg(config, "visuals", "loop_steam_opacity", 0.08)), 0.01)
+                        visuals["loop_steam_blur"] = st.slider("Blur", 0.0, 30.0, float(cfg(config, "visuals", "loop_steam_blur", 10.0)), 1.0)
+                    with col2:
+                        visuals["loop_steam_drift_x"] = st.slider("Drift X", 0.0, 0.1, float(cfg(config, "visuals", "loop_steam_drift_x", 0.02)), 0.005)
+                        visuals["loop_steam_drift_y"] = st.slider("Drift Y", 0.0, 0.2, float(cfg(config, "visuals", "loop_steam_drift_y", 0.05)), 0.01)
+
+            if "flicker" in visuals["loop_effects"]:
+                visuals["loop_flicker_amount"] = st.slider(
                     "Flicker amount",
-                    min_value=0.0,
-                    max_value=0.05,
-                    value=float(loop_flicker_amount),
-                    step=0.005,
+                    min_value=0.0, max_value=0.05, step=0.005,
+                    value=float(cfg(config, "visuals", "loop_flicker_amount", 0.015)),
                 )
-            if "color_drift" in loop_effects:
-                loop_hue_degrees = st.number_input(
-                    "Color drift degrees",
-                    min_value=0.0,
-                    max_value=6.0,
-                    value=float(loop_hue_degrees),
-                    step=0.25,
-                )
-            if "vignette" in loop_effects:
-                loop_vignette_angle = st.number_input(
-                    "Vignette angle (lower = stronger)",
-                    min_value=0.2,
-                    max_value=1.5,
-                    value=float(loop_vignette_angle),
-                    step=0.05,
-                )
-        else:
-            loop_effects = cfg(config, "visuals", "loop_effects", [])
-            loop_sway_degrees = float(cfg(config, "visuals", "loop_sway_degrees", 0.35))
-            loop_flicker_amount = float(
-                cfg(config, "visuals", "loop_flicker_amount", 0.015)
-            )
-            loop_hue_degrees = float(cfg(config, "visuals", "loop_hue_degrees", 0.0))
-            loop_vignette_angle = cfg(config, "visuals", "loop_vignette_angle", 0.63)
-            loop_steam_opacity = float(cfg(config, "visuals", "loop_steam_opacity", 0.08))
-            loop_steam_blur = float(cfg(config, "visuals", "loop_steam_blur", 10.0))
-            loop_steam_noise = int(cfg(config, "visuals", "loop_steam_noise", 12))
-            loop_steam_drift_x = float(cfg(config, "visuals", "loop_steam_drift_x", 0.02))
-            loop_steam_drift_y = float(cfg(config, "visuals", "loop_steam_drift_y", 0.05))
-            loop_motion_style = cfg(config, "visuals", "loop_motion_style", "cinematic")
 
-        loop_duration = st.number_input(
-            "Loop duration (seconds)",
-            min_value=1,
-            max_value=30,
-            value=int(cfg(config, "visuals", "loop_duration_seconds", 5)),
-        )
-        fps = st.number_input(
-            "FPS",
-            min_value=1,
-            max_value=60,
-            value=int(cfg(config, "visuals", "fps", cfg(config, "video", "fps", 30))),
-        )
+            if "vignette" in visuals["loop_effects"]:
+                visuals["loop_vignette_angle"] = st.slider(
+                    "Vignette strength",
+                    min_value=0.2, max_value=1.5, step=0.05,
+                    value=safe_float(cfg(config, "visuals", "loop_vignette_angle", 0.63), 0.63),
+                )
 
-        st.subheader("Text Overlay + Thumbnail")
-        overlay_text = st.text_area(
-            "Overlay text (leave blank to disable)",
+    st.markdown("---")
+
+    # Text overlay
+    st.markdown("### Text Overlay")
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        visuals["overlay_text"] = st.text_input(
+            "Overlay text",
             cfg(config, "text_overlay", "text", "") or "",
+            placeholder="Leave blank to use auto texts"
         )
-        overlay_auto_texts_input = st.text_area(
-            "Auto overlay texts (one per line, used only if overlay text is blank)",
-            "\n".join(cfg(config, "text_overlay", "auto_texts", [])),
-        )
-        overlay_auto_mode = st.selectbox(
-            "Auto text mode",
+    with col2:
+        visuals["overlay_auto_mode"] = st.selectbox(
+            "Auto mode",
             ["daily", "random"],
             index=0 if cfg(config, "text_overlay", "auto_mode", "daily") == "daily" else 1,
         )
-        overlay_apply_to_video = st.checkbox(
-            "Burn text into video",
+
+    visuals["overlay_auto_texts"] = st.text_area(
+        "Auto texts (one per line)",
+        "\n".join(cfg(config, "text_overlay", "auto_texts", [])),
+        height=80,
+        placeholder="LOCK IN\nFOCUS\nRELAX"
+    )
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        visuals["overlay_apply_to_video"] = st.checkbox(
+            "Burn into video",
             value=bool(cfg(config, "text_overlay", "apply_to_video", True)),
         )
-        overlay_create_thumbnail = st.checkbox(
-            "Create thumbnail image with text",
+    with col2:
+        visuals["overlay_create_thumbnail"] = st.checkbox(
+            "Create thumbnail",
             value=bool(cfg(config, "text_overlay", "create_thumbnail", True)),
         )
-        overlay_upload_thumbnail = st.checkbox(
-            "Upload thumbnail to YouTube",
+    with col3:
+        visuals["overlay_upload_thumbnail"] = st.checkbox(
+            "Upload thumbnail",
             value=bool(cfg(config, "text_overlay", "upload_thumbnail", False)),
         )
-        overlay_font_path = st.text_input(
-            "Font file path (optional)",
-            cfg(config, "text_overlay", "fontfile", "") or "",
-        )
-        upload_overlay_font = st.file_uploader(
-            "Upload font file (TTF/OTF)",
-            type=["ttf", "otf"],
-        )
-        overlay_font_name = st.text_input(
-            "Font family name (optional)",
-            cfg(config, "text_overlay", "font", "") or "",
-        )
-        overlay_font_size = st.number_input(
-            "Font size",
-            min_value=10,
-            max_value=400,
-            value=int(cfg(config, "text_overlay", "font_size", 96)),
-        )
-        overlay_font_color = st.text_input(
-            "Font color",
-            cfg(config, "text_overlay", "font_color", "white"),
-        )
-        overlay_outline_color = st.text_input(
-            "Outline color",
-            cfg(config, "text_overlay", "outline_color", "black"),
-        )
-        overlay_outline_width = st.number_input(
-            "Outline width",
-            min_value=0,
-            max_value=20,
-            value=int(cfg(config, "text_overlay", "outline_width", 4)),
-        )
+
+    with st.expander("Text Styling"):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            visuals["font_size"] = st.number_input(
+                "Font size",
+                min_value=10, max_value=400,
+                value=int(cfg(config, "text_overlay", "font_size", 96)),
+            )
+        with col2:
+            visuals["font_color"] = st.text_input(
+                "Font color",
+                cfg(config, "text_overlay", "font_color", "white"),
+            )
+        with col3:
+            visuals["outline_color"] = st.text_input(
+                "Outline color",
+                cfg(config, "text_overlay", "outline_color", "black"),
+            )
+
         position_options = {
             "center": ("(w-text_w)/2", "(h-text_h)/2"),
             "lower third": ("(w-text_w)/2", "(h-text_h)*0.75"),
             "top": ("(w-text_w)/2", "(h-text_h)*0.15"),
         }
-        current_x = cfg(config, "text_overlay", "x", "(w-text_w)/2")
-        current_y = cfg(config, "text_overlay", "y", "(h-text_h)/2")
-        position_default = "custom"
-        for label, (x_value, y_value) in position_options.items():
-            if current_x == x_value and current_y == y_value:
-                position_default = label
-                break
-        position_choice = st.selectbox(
-            "Text position",
-            ["center", "lower third", "top", "custom"],
-            index=["center", "lower third", "top", "custom"].index(position_default),
+        visuals["text_position"] = st.selectbox(
+            "Position",
+            ["center", "lower third", "top"],
+            index=0,
         )
-        if position_choice == "custom":
-            overlay_x = st.text_input("X position expression", current_x)
-            overlay_y = st.text_input("Y position expression", current_y)
-        else:
-            overlay_x, overlay_y = position_options[position_choice]
+        visuals["overlay_x"], visuals["overlay_y"] = position_options[visuals["text_position"]]
 
-        st.subheader("Video")
-        resolution = st.text_input(
+    return visuals
+
+
+def render_upload_tab(config: dict[str, Any]) -> dict[str, Any]:
+    """Render upload configuration tab"""
+    upload = {}
+
+    st.markdown("### YouTube Upload")
+
+    upload["enabled"] = st.checkbox(
+        "Enable upload",
+        value=bool(cfg(config, "upload", "enabled", True)),
+    )
+
+    if upload["enabled"]:
+        col1, col2 = st.columns(2)
+        with col1:
+            upload["privacy_status"] = st.selectbox(
+                "Privacy",
+                ["public", "unlisted", "private"],
+                index=["public", "unlisted", "private"].index(
+                    cfg(config, "upload", "privacy_status", "public")
+                ),
+            )
+        with col2:
+            upload["category_id"] = st.text_input(
+                "Category ID",
+                cfg(config, "upload", "category_id", "10"),
+                help="10 = Music"
+            )
+
+        upload["title_template"] = st.text_input(
+            "Title template",
+            cfg(config, "upload", "title_template", "Daily Chill Mix - {date}"),
+        )
+
+        upload["description_template"] = st.text_area(
+            "Description template",
+            cfg(config, "upload", "description_template", "Longform ambient mix. Generated daily."),
+            height=100,
+        )
+
+        upload["tags"] = st.text_input(
+            "Tags (comma-separated)",
+            ", ".join(cfg(config, "upload", "tags", ["ambient", "chill", "lofi"])),
+        )
+
+        with st.expander("YouTube Credentials"):
+            upload["credentials_json"] = st.text_input(
+                "OAuth client JSON path",
+                cfg(config, "upload", "credentials_json", "secrets/youtube_client.json"),
+            )
+            upload["token_json"] = st.text_input(
+                "Token JSON path",
+                cfg(config, "upload", "token_json", "secrets/youtube_token.json"),
+            )
+            upload["upload_youtube_client"] = st.file_uploader(
+                "Upload OAuth client JSON",
+                type=["json"],
+            )
+
+    st.markdown("---")
+
+    # Tracklist
+    st.markdown("### Tracklist")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        upload["tracklist_enabled"] = st.checkbox(
+            "Generate timestamps",
+            value=bool(cfg(config, "tracklist", "enabled", True)),
+        )
+    with col2:
+        upload["embed_chapters"] = st.checkbox(
+            "Embed chapters in MP4",
+            value=bool(cfg(config, "tracklist", "embed_chapters", True)),
+        )
+
+    upload["append_to_description"] = st.checkbox(
+        "Append to description",
+        value=bool(cfg(config, "tracklist", "append_to_description", True)),
+    )
+
+    st.markdown("---")
+
+    # Video output settings
+    st.markdown("### Video Output")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        upload["resolution"] = st.text_input(
             "Resolution",
             cfg(config, "video", "resolution", "1920x1080"),
         )
-        video_bitrate = st.text_input(
+    with col2:
+        upload["video_bitrate"] = st.text_input(
             "Video bitrate",
             cfg(config, "video", "video_bitrate", "4500k"),
         )
-        audio_bitrate = st.text_input(
+    with col3:
+        upload["audio_bitrate"] = st.text_input(
             "Audio bitrate",
             cfg(config, "video", "audio_bitrate", "192k"),
         )
 
-        st.subheader("Upload")
-        upload_enabled = st.checkbox(
-            "Enable upload",
-            value=bool(cfg(config, "upload", "enabled", True)),
+    return upload
+
+
+def render_settings_tab(config: dict[str, Any]) -> dict[str, Any]:
+    """Render settings/schedule tab"""
+    settings = {}
+
+    st.markdown("### Project")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        settings["project_name"] = st.text_input(
+            "Project name",
+            cfg(config, "project", "name", "daily_chill_mix"),
         )
-        youtube_client_path = st.text_input(
-            "YouTube OAuth client JSON path",
-            cfg(config, "upload", "credentials_json", "secrets/youtube_client.json"),
-        )
-        upload_youtube_client = st.file_uploader("Upload YouTube OAuth client JSON", type=["json"])
-        youtube_token_path = st.text_input(
-            "YouTube token JSON path (created on first auth)",
-            cfg(config, "upload", "token_json", "secrets/youtube_token.json"),
-        )
-        privacy_status = st.selectbox(
-            "Privacy status",
-            ["public", "unlisted", "private"],
-            index=["public", "unlisted", "private"].index(
-                cfg(config, "upload", "privacy_status", "public")
-            ),
-        )
-        category_id = st.text_input(
-            "YouTube category ID",
-            cfg(config, "upload", "category_id", "10"),
-        )
-        title_template = st.text_input(
-            "Title template",
-            cfg(config, "upload", "title_template", "Daily Chill Mix - {date}"),
-        )
-        description_template = st.text_area(
-            "Description template",
-            cfg(config, "upload", "description_template", "Longform ambient mix. Generated daily."),
-        )
-        tags_text = st.text_input(
-            "Tags (comma-separated)",
-            ", ".join(cfg(config, "upload", "tags", ["ambient", "chill", "fireplace"])),
+    with col2:
+        settings["output_dir"] = st.text_input(
+            "Output folder",
+            cfg(config, "project", "output_dir", "runs"),
         )
 
-        st.subheader("Tracklist")
-        tracklist_enabled = st.checkbox(
-            "Generate timestamps",
-            value=bool(cfg(config, "tracklist", "enabled", True)),
-        )
-        tracklist_append = st.checkbox(
-            "Append tracklist to description",
-            value=bool(cfg(config, "tracklist", "append_to_description", True)),
-        )
-        tracklist_embed = st.checkbox(
-            "Embed chapters into MP4",
-            value=bool(cfg(config, "tracklist", "embed_chapters", True)),
-        )
-        tracklist_filename = st.text_input(
-            "Tracklist filename",
-            cfg(config, "tracklist", "filename", "tracklist.txt"),
-        )
+    st.markdown("---")
 
-        st.subheader("Test mode")
-        test_enabled = st.checkbox(
-            "Enable test mode (no upload, no repeat)",
-            value=bool(cfg(config, "test", "enabled", False)),
-        )
-        test_max_minutes_value = cfg(config, "test", "max_minutes", None) or 0
-        test_max_minutes = st.number_input(
-            "Max minutes (0 = full length)",
-            min_value=0,
-            max_value=720,
-            value=int(test_max_minutes_value),
-        )
+    # Schedule
+    st.markdown("### Schedule")
 
-        st.subheader("Schedule")
-        schedule_enabled = st.checkbox(
+    col1, col2 = st.columns(2)
+    with col1:
+        settings["schedule_enabled"] = st.checkbox(
             "Enable daily schedule",
             value=bool(cfg(config, "schedule", "enabled", True)),
         )
-        daily_time = st.text_input(
-            "Daily time (HH:MM, 24h)",
+    with col2:
+        settings["daily_time"] = st.text_input(
+            "Daily time (HH:MM)",
             cfg(config, "schedule", "daily_time", "03:00"),
         )
 
-        with st.expander("Advanced: Whisk/Grok command templates"):
-            whisk_command = st.text_area(
-                "Whisk command template (YAML list)",
-                yaml.safe_dump(
-                    cfg(
-                        config,
-                        "visuals",
-                        "whisk_command",
-                        [
-                            "whisk",
-                            "image",
-                            "--prompt",
-                            "{prompt}",
-                            "--out",
-                            "{output_path}",
-                        ],
-                    ),
-                    sort_keys=False,
-                ).strip(),
+    st.markdown("---")
+
+    # Test mode
+    st.markdown("### Test Mode")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        settings["test_enabled"] = st.checkbox(
+            "Enable test mode",
+            value=bool(cfg(config, "test", "enabled", False)),
+            help="No upload, no repeat"
+        )
+    with col2:
+        settings["test_max_minutes"] = st.number_input(
+            "Max minutes (0 = full)",
+            min_value=0, max_value=720,
+            value=int(cfg(config, "test", "max_minutes", 0) or 0),
+        )
+
+    st.markdown("---")
+
+    # Presets
+    st.markdown("### Quick Presets")
+
+    preset_choice = st.selectbox(
+        "Load preset",
+        ["None"] + sorted(PRESETS.keys()),
+    )
+
+    if st.button("Apply Preset"):
+        if preset_choice != "None":
+            st.session_state.config = apply_preset(
+                st.session_state.config,
+                PRESETS[preset_choice],
             )
-            grok_command = st.text_area(
-                "Grok command template (YAML list)",
-                yaml.safe_dump(
-                    cfg(
-                        config,
-                        "visuals",
-                        "grok_command",
-                        [
-                            "grok",
-                            "video",
-                            "--image",
-                            "{image_path}",
-                            "--prompt",
-                            "{prompt}",
-                            "--duration",
-                            "{duration}",
-                            "--fps",
-                            "{fps}",
-                            "--out",
-                            "{output_path}",
-                        ],
-                    ),
-                    sort_keys=False,
-                ).strip(),
+            st.success(f"Applied '{preset_choice}' preset")
+            st.rerun()
+
+    return settings
+
+
+def build_full_config(
+    audio: dict[str, Any],
+    visuals: dict[str, Any],
+    upload: dict[str, Any],
+    settings: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the complete config dict from all tabs"""
+
+    # Handle uploaded files
+    saved_image_path = visuals.get("image_path", "")
+    if visuals.get("upload_image"):
+        saved_image_path = save_uploaded_file(visuals["upload_image"], ASSETS_DIR / "image.png")
+
+    saved_loop_path = visuals.get("loop_video_path", "")
+    if visuals.get("upload_loop"):
+        saved_loop_path = save_uploaded_file(visuals["upload_loop"], ASSETS_DIR / "loop.mp4")
+
+    saved_audio_folder = audio.get("local_folder", "")
+    if audio.get("source") == "local" and audio.get("uploaded_files"):
+        timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        audio_upload_dir = ASSETS_DIR / "audio_uploads" / timestamp
+        audio_upload_dir.mkdir(parents=True, exist_ok=True)
+        for up in audio["uploaded_files"]:
+            filename = Path(up.name).name
+            (audio_upload_dir / filename).write_bytes(up.getvalue())
+        saved_audio_folder = path_for_config(audio_upload_dir)
+
+    saved_youtube_client = upload.get("credentials_json", "secrets/youtube_client.json")
+    if upload.get("upload_youtube_client"):
+        saved_youtube_client = save_uploaded_file(
+            upload["upload_youtube_client"],
+            SECRETS_DIR / "youtube_client.json"
+        )
+
+    return {
+        "project": {
+            "name": settings.get("project_name", "daily_chill_mix"),
+            "output_dir": settings.get("output_dir", "runs"),
+        },
+        "audio": {
+            "source": audio.get("source", "local"),
+            "drive_folder_id": audio.get("drive_folder_id", ""),
+            "local_folder": saved_audio_folder or None,
+            "ordering": audio.get("ordering", "name"),
+            "repeat_playlist": audio.get("repeat_playlist", True),
+            "recursive": audio.get("recursive", False),
+            "target_hours_min": int(audio.get("target_hours_min", 8)),
+            "target_hours_max": int(audio.get("target_hours_max", 9)),
+            "concat_codec": "libmp3lame",
+            "concat_quality": int(audio.get("concat_quality", 2)),
+            "concat_bitrate": audio.get("concat_bitrate") or None,
+        },
+        "drive": {
+            "use_service_account": audio.get("use_service_account", True),
+            "service_account_json": audio.get("service_account_json") or None,
+            "oauth_client_json": audio.get("oauth_client_json") or None,
+            "token_json": audio.get("token_json") or None,
+        },
+        "visuals": {
+            "image_prompt": visuals.get("image_prompt", ""),
+            "video_prompt": visuals.get("video_prompt", ""),
+            "loop_duration_seconds": int(visuals.get("loop_duration_seconds", 5)),
+            "fps": int(visuals.get("fps", 30)),
+            "image_path": saved_image_path or None,
+            "loop_video_path": saved_loop_path or None,
+            "image_provider": visuals.get("image_provider", "openai"),
+            "openai_api_key_env": cfg(config, "visuals", "openai_api_key_env", "OPENAI_API_KEY"),
+            "openai_model": visuals.get("openai_model", "gpt-image-1"),
+            "openai_size": visuals.get("openai_size", "1792x1024"),
+            "loop_provider": visuals.get("loop_provider", "ffmpeg"),
+            "loop_zoom_amount": float(visuals.get("loop_zoom_amount", 0.02)),
+            "loop_pan_amount": float(visuals.get("loop_pan_amount", 0.15)),
+            "loop_motion_style": visuals.get("loop_motion_style", "cinematic"),
+            "loop_effects": visuals.get("loop_effects", []),
+            "loop_flicker_amount": float(visuals.get("loop_flicker_amount", 0.015)),
+            "loop_vignette_angle": safe_float(visuals.get("loop_vignette_angle", 0.63), 0.63),
+            "loop_steam_opacity": float(visuals.get("loop_steam_opacity", 0.08)),
+            "loop_steam_blur": float(visuals.get("loop_steam_blur", 10.0)),
+            "loop_steam_noise": int(visuals.get("loop_steam_noise", 12)),
+            "loop_steam_drift_x": float(visuals.get("loop_steam_drift_x", 0.02)),
+            "loop_steam_drift_y": float(visuals.get("loop_steam_drift_y", 0.05)),
+            "auto_background": visuals.get("auto_background", False),
+            "background_color": visuals.get("background_color", "black"),
+        },
+        "text_overlay": {
+            "text": visuals.get("overlay_text") or None,
+            "auto_texts": split_text_lines(visuals.get("overlay_auto_texts", "")),
+            "auto_mode": visuals.get("overlay_auto_mode", "daily"),
+            "font_size": int(visuals.get("font_size", 96)),
+            "font_color": visuals.get("font_color", "white"),
+            "outline_color": visuals.get("outline_color", "black"),
+            "outline_width": 4,
+            "x": visuals.get("overlay_x", "(w-text_w)/2"),
+            "y": visuals.get("overlay_y", "(h-text_h)/2"),
+            "apply_to_video": visuals.get("overlay_apply_to_video", True),
+            "create_thumbnail": visuals.get("overlay_create_thumbnail", True),
+            "upload_thumbnail": visuals.get("overlay_upload_thumbnail", False),
+        },
+        "video": {
+            "resolution": upload.get("resolution", "1920x1080"),
+            "fps": int(visuals.get("fps", 30)),
+            "video_bitrate": upload.get("video_bitrate", "4500k"),
+            "audio_bitrate": upload.get("audio_bitrate", "192k"),
+        },
+        "upload": {
+            "enabled": upload.get("enabled", True),
+            "provider": "youtube",
+            "credentials_json": saved_youtube_client,
+            "token_json": upload.get("token_json", "secrets/youtube_token.json"),
+            "privacy_status": upload.get("privacy_status", "public"),
+            "category_id": upload.get("category_id", "10"),
+            "title_template": upload.get("title_template", "Daily Chill Mix - {date}"),
+            "description_template": upload.get("description_template", ""),
+            "tags": split_tags(upload.get("tags", "")),
+        },
+        "tracklist": {
+            "enabled": upload.get("tracklist_enabled", True),
+            "filename": "tracklist.txt",
+            "append_to_description": upload.get("append_to_description", True),
+            "embed_chapters": upload.get("embed_chapters", True),
+        },
+        "test": {
+            "enabled": settings.get("test_enabled", False),
+            "max_minutes": int(settings.get("test_max_minutes", 0)) or None,
+            "disable_upload": True,
+            "repeat_playlist": False,
+        },
+        "schedule": {
+            "enabled": settings.get("schedule_enabled", True),
+            "daily_time": settings.get("daily_time", "03:00"),
+        },
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main Application
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    st.set_page_config(
+        page_title="Video Creator Agent",
+        page_icon="",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+
+    # Inject custom CSS
+    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+    # Password protection
+    if not require_password():
+        st.stop()
+
+    # Load config
+    if "config" not in st.session_state:
+        st.session_state.config = load_config()
+    config = st.session_state.config
+
+    # Demo mode
+    demo_mode = os.getenv("DEMO_MODE") == "1"
+
+    # Render sidebar and get actions
+    actions = render_sidebar(config, demo_mode)
+
+    # Header
+    st.markdown("# Video Creator Agent")
+    st.caption("Automated pipeline for generating looped visual + audio videos")
+
+    # Main tabs
+    tab_dashboard, tab_audio, tab_visuals, tab_upload, tab_settings = st.tabs([
+        " Dashboard",
+        " Audio",
+        " Visuals",
+        " Upload",
+        " Settings"
+    ])
+
+    audio_config = {}
+    visuals_config = {}
+    upload_config = {}
+    settings_config = {}
+
+    with tab_dashboard:
+        render_dashboard_tab(config)
+
+    with tab_audio:
+        audio_config = render_audio_tab(config)
+
+    with tab_visuals:
+        visuals_config = render_visuals_tab(config)
+
+    with tab_upload:
+        upload_config = render_upload_tab(config)
+
+    with tab_settings:
+        settings_config = render_settings_tab(config)
+
+    # Save button (fixed at bottom)
+    st.markdown("---")
+
+    col1, col2, col3 = st.columns([1, 1, 2])
+
+    with col1:
+        if st.button(" Save Configuration", disabled=demo_mode, use_container_width=True):
+            full_config = build_full_config(
+                audio_config, visuals_config, upload_config, settings_config, config
             )
+            save_config(full_config)
+            st.session_state.config = full_config
+            st.success("Configuration saved")
 
-        st.caption("Run from UI (local machine only).")
-        preview_submitted = st.form_submit_button("Preview thumbnail overlay")
-        submitted = st.form_submit_button("Save config", disabled=demo_mode)
-        run_test_submitted = st.form_submit_button(
-            "Run test now (quick)",
-            disabled=demo_mode,
-        )
-        run_full_submitted = st.form_submit_button(
-            "Start full run (background)",
-            disabled=demo_mode,
-        )
-        stop_full_submitted = st.form_submit_button(
-            "Stop full run",
-            disabled=demo_mode,
-        )
-        schedule_start_submitted = st.form_submit_button(
-            "Start daily schedule (background)",
-            disabled=demo_mode,
-        )
-        schedule_stop_submitted = st.form_submit_button(
-            "Stop daily schedule",
-            disabled=demo_mode,
-        )
-
-    if preview_submitted:
-        auto_texts = split_text_lines(overlay_auto_texts_input)
-        selected_text = select_overlay_text(
-            overlay_text,
-            auto_texts,
-            overlay_auto_mode,
-        )
-        if not selected_text:
-            st.warning("Add overlay text or auto texts to generate a preview.")
-        else:
-            preview_dir = ROOT / "runs" / "_preview"
-            preview_dir.mkdir(parents=True, exist_ok=True)
-            preview_text_path = preview_dir / "preview_overlay.txt"
-            preview_text_path.write_text(selected_text, encoding="utf-8")
-
-            preview_image_path = None
-            if upload_image is not None:
-                suffix = Path(upload_image.name).suffix or ".png"
-                preview_image_path = preview_dir / f"preview_base{suffix}"
-                preview_image_path.write_bytes(upload_image.getvalue())
-            elif image_path:
-                resolved_image = resolve_path(image_path)
-                if resolved_image.exists():
-                    preview_image_path = resolved_image
-                else:
-                    st.error(f"Image not found: {resolved_image}")
-            elif auto_background:
-                preview_image_path = preview_dir / "preview_base.png"
-                generate_color_image(
-                    preview_image_path,
-                    resolution=resolution,
-                    color=background_color,
-                )
+    with col2:
+        # Preview thumbnail button
+        if st.button(" Preview Thumbnail", use_container_width=True):
+            auto_texts = split_text_lines(visuals_config.get("overlay_auto_texts", ""))
+            selected_text = select_overlay_text(
+                visuals_config.get("overlay_text", ""),
+                auto_texts,
+                visuals_config.get("overlay_auto_mode", "daily"),
+            )
+            if not selected_text:
+                st.warning("Add overlay text to preview")
             else:
-                st.warning("Provide an image or enable auto background to preview.")
+                preview_dir = ROOT / "runs" / "_preview"
+                preview_dir.mkdir(parents=True, exist_ok=True)
+                preview_text_path = preview_dir / "preview_overlay.txt"
+                preview_text_path.write_text(selected_text, encoding="utf-8")
 
-            if preview_image_path:
-                preview_font_path = None
-                if upload_overlay_font is not None:
-                    suffix = Path(upload_overlay_font.name).suffix or ".ttf"
-                    preview_font_path = preview_dir / f"preview_font{suffix}"
-                    preview_font_path.write_bytes(upload_overlay_font.getvalue())
-                elif overlay_font_path:
-                    resolved_font = resolve_path(overlay_font_path)
-                    if resolved_font.exists():
-                        preview_font_path = resolved_font
-
-                drawtext_filter = build_drawtext_filter(
-                    textfile=preview_text_path,
-                    fontfile=preview_font_path,
-                    font=overlay_font_name or None,
-                    font_size=int(overlay_font_size),
-                    font_color=overlay_font_color,
-                    x=overlay_x,
-                    y=overlay_y,
-                    border_color=overlay_outline_color,
-                    border_width=int(overlay_outline_width),
-                    box_color=cfg(config, "text_overlay", "box_color", None),
-                    box_borderw=cfg(config, "text_overlay", "box_borderw", None),
-                    shadow_color=cfg(config, "text_overlay", "shadow_color", None),
-                    shadow_x=cfg(config, "text_overlay", "shadow_x", None),
-                    shadow_y=cfg(config, "text_overlay", "shadow_y", None),
-                )
-                preview_output = preview_dir / "thumbnail_preview.png"
-                try:
-                    render_image_with_text(
+                # Determine preview image
+                preview_image_path = None
+                if visuals_config.get("upload_image"):
+                    suffix = Path(visuals_config["upload_image"].name).suffix or ".png"
+                    preview_image_path = preview_dir / f"preview_base{suffix}"
+                    preview_image_path.write_bytes(visuals_config["upload_image"].getvalue())
+                elif visuals_config.get("image_path"):
+                    resolved = resolve_path(visuals_config["image_path"])
+                    if resolved.exists():
+                        preview_image_path = resolved
+                elif visuals_config.get("auto_background"):
+                    preview_image_path = preview_dir / "preview_base.png"
+                    generate_color_image(
                         preview_image_path,
-                        preview_output,
-                        drawtext_filter,
+                        resolution=upload_config.get("resolution", "1920x1080"),
+                        color=visuals_config.get("background_color", "black"),
                     )
-                    st.session_state.preview_path = str(preview_output)
-                    st.success(f"Preview generated with: {selected_text}")
-                except RuntimeError as exc:
-                    st.error(f"Preview failed: {exc}")
 
-    def build_config() -> dict[str, Any] | None:
-        saved_service_account_path = service_account_path
-        saved_oauth_path = ""
-        saved_drive_token = ""
-        if use_service_account:
-            if upload_sa is not None:
-                saved_service_account_path = save_uploaded_file(
-                    upload_sa, SECRETS_DIR / "drive_service_account.json"
-                )
-            saved_oauth_path = ""
-            saved_drive_token = ""
-        else:
-            if upload_oauth is not None:
-                saved_oauth_path = save_uploaded_file(
-                    upload_oauth, SECRETS_DIR / "drive_oauth_client.json"
-                )
-            else:
-                saved_oauth_path = oauth_client_path
-            saved_drive_token = drive_token_path
+                if preview_image_path:
+                    drawtext_filter = build_drawtext_filter(
+                        textfile=preview_text_path,
+                        font_size=int(visuals_config.get("font_size", 96)),
+                        font_color=visuals_config.get("font_color", "white"),
+                        x=visuals_config.get("overlay_x", "(w-text_w)/2"),
+                        y=visuals_config.get("overlay_y", "(h-text_h)/2"),
+                        border_color=visuals_config.get("outline_color", "black"),
+                        border_width=4,
+                    )
+                    preview_output = preview_dir / "thumbnail_preview.png"
+                    try:
+                        render_image_with_text(preview_image_path, preview_output, drawtext_filter)
+                        st.session_state.preview_path = str(preview_output)
+                        st.success(f"Preview: {selected_text}")
+                    except RuntimeError as exc:
+                        st.error(f"Preview failed: {exc}")
 
-        saved_image_path = image_path
-        if upload_image is not None:
-            saved_image_path = save_uploaded_file(upload_image, ASSETS_DIR / "image.png")
-
-        saved_audio_folder = local_folder
-        if audio_source == "local" and uploaded_audio_files:
-            timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-            audio_upload_dir = ASSETS_DIR / "audio_uploads" / timestamp
-            audio_upload_dir.mkdir(parents=True, exist_ok=True)
-            for upload in uploaded_audio_files:
-                filename = Path(upload.name).name
-                (audio_upload_dir / filename).write_bytes(upload.getvalue())
-            saved_audio_folder = path_for_config(audio_upload_dir)
-
-        saved_loop_path = loop_video_path
-        if upload_loop is not None:
-            saved_loop_path = save_uploaded_file(upload_loop, ASSETS_DIR / "loop.mp4")
-
-        saved_overlay_font_path = overlay_font_path
-        if upload_overlay_font is not None:
-            suffix = Path(upload_overlay_font.name).suffix or ".ttf"
-            saved_overlay_font_path = save_uploaded_file(
-                upload_overlay_font, ASSETS_DIR / f"overlay_font{suffix}"
-            )
-
-        saved_youtube_client = youtube_client_path
-        if upload_youtube_client is not None:
-            saved_youtube_client = save_uploaded_file(
-                upload_youtube_client, SECRETS_DIR / "youtube_client.json"
-            )
-
-        try:
-            parsed_whisk_command = yaml.safe_load(whisk_command) or []
-            parsed_grok_command = yaml.safe_load(grok_command) or []
-        except yaml.YAMLError:
-            st.error("Invalid YAML in command templates.")
-            return None
-        resolved_loop_effects = loop_effects
-        if isinstance(resolved_loop_effects, str):
-            resolved_loop_effects = [
-                item.strip() for item in resolved_loop_effects.split(",") if item.strip()
-            ]
-
-        return {
-            "project": {
-                "name": project_name,
-                "output_dir": output_dir,
-            },
-            "audio": {
-                "source": audio_source,
-                "drive_folder_id": drive_folder_id,
-                "local_folder": saved_audio_folder or None,
-                "ordering": ordering,
-                "repeat_playlist": repeat_playlist,
-                "recursive": recursive,
-                "target_hours_min": int(target_hours_min),
-                "target_hours_max": int(target_hours_max),
-                "concat_codec": "libmp3lame",
-                "concat_quality": int(concat_quality),
-                "concat_bitrate": concat_bitrate or None,
-            },
-            "drive": {
-                "use_service_account": use_service_account,
-                "service_account_json": saved_service_account_path or None,
-                "oauth_client_json": saved_oauth_path or None,
-                "token_json": saved_drive_token or None,
-            },
-            "visuals": {
-                "image_prompt": image_prompt,
-                "video_prompt": video_prompt,
-                "loop_duration_seconds": int(loop_duration),
-                "fps": int(fps),
-                "image_path": saved_image_path or None,
-                "loop_video_path": saved_loop_path or None,
-                "image_provider": image_provider,
-                "openai_api_key_env": openai_api_key_env,
-                "openai_model": openai_model,
-                "openai_size": openai_size,
-                "openai_quality": openai_quality or None,
-                "openai_style": openai_style or None,
-                "openai_base_url": openai_base_url or None,
-                "loop_provider": loop_provider,
-                "loop_zoom_amount": float(loop_zoom_amount),
-                "loop_pan_amount": float(loop_pan_amount),
-                "loop_motion_style": loop_motion_style,
-                "loop_effects": resolved_loop_effects or [],
-                "loop_sway_degrees": float(loop_sway_degrees),
-                "loop_flicker_amount": float(loop_flicker_amount),
-                "loop_hue_degrees": float(loop_hue_degrees),
-                "loop_vignette_angle": loop_vignette_angle,
-                "loop_steam_opacity": float(loop_steam_opacity),
-                "loop_steam_blur": float(loop_steam_blur),
-                "loop_steam_noise": int(loop_steam_noise),
-                "loop_steam_drift_x": float(loop_steam_drift_x),
-                "loop_steam_drift_y": float(loop_steam_drift_y),
-                "auto_background": auto_background,
-                "background_color": background_color,
-                "whisk_mode": "command",
-                "whisk_command": parsed_whisk_command,
-                "whisk_api_key_env": cfg(config, "visuals", "whisk_api_key_env", "WHISK_API_KEY"),
-                "whisk_model": cfg(config, "visuals", "whisk_model", None),
-                "grok_mode": "command",
-                "grok_command": parsed_grok_command,
-                "grok_api_key_env": cfg(config, "visuals", "grok_api_key_env", "GROK_API_KEY"),
-                "grok_model": cfg(config, "visuals", "grok_model", None),
-            },
-            "text_overlay": {
-                "text": overlay_text or None,
-                "auto_texts": split_text_lines(overlay_auto_texts_input),
-                "auto_mode": overlay_auto_mode,
-                "fontfile": saved_overlay_font_path or None,
-                "font": overlay_font_name or None,
-                "font_size": int(overlay_font_size),
-                "font_color": overlay_font_color,
-                "outline_color": overlay_outline_color,
-                "outline_width": int(overlay_outline_width),
-                "box_color": cfg(config, "text_overlay", "box_color", None),
-                "box_borderw": cfg(config, "text_overlay", "box_borderw", None),
-                "shadow_color": cfg(config, "text_overlay", "shadow_color", None),
-                "shadow_x": cfg(config, "text_overlay", "shadow_x", None),
-                "shadow_y": cfg(config, "text_overlay", "shadow_y", None),
-                "x": overlay_x,
-                "y": overlay_y,
-                "apply_to_video": overlay_apply_to_video,
-                "create_thumbnail": overlay_create_thumbnail,
-                "upload_thumbnail": overlay_upload_thumbnail,
-            },
-            "video": {
-                "resolution": resolution,
-                "fps": int(fps),
-                "video_bitrate": video_bitrate,
-                "audio_bitrate": audio_bitrate,
-            },
-            "upload": {
-                "enabled": upload_enabled,
-                "provider": "youtube",
-                "credentials_json": saved_youtube_client,
-                "token_json": youtube_token_path,
-                "privacy_status": privacy_status,
-                "category_id": category_id,
-                "title_template": title_template,
-                "description_template": description_template,
-                "tags": split_tags(tags_text),
-            },
-            "tracklist": {
-                "enabled": tracklist_enabled,
-                "filename": tracklist_filename or "tracklist.txt",
-                "append_to_description": tracklist_append,
-                "embed_chapters": tracklist_embed,
-            },
-            "test": {
-                "enabled": test_enabled,
-                "max_minutes": int(test_max_minutes) if test_max_minutes else None,
-                "disable_upload": True,
-                "repeat_playlist": False,
-            },
-            "schedule": {
-                "enabled": schedule_enabled,
-                "daily_time": daily_time,
-            },
-        }
-
-    needs_save = submitted or run_test_submitted or run_full_submitted or schedule_start_submitted
-    config_out: dict[str, Any] | None = None
-    if needs_save:
-        if demo_mode:
-            st.warning("Demo mode is enabled. Disable it to save or run.")
-        else:
-            config_out = build_config()
-            if config_out is not None:
-                save_config(config_out)
-                st.success(f"Saved config at {CONFIG_PATH}")
-
-    if run_test_submitted and not demo_mode and config_out is not None:
-        test_minutes = int(test_max_minutes) if test_max_minutes else None
-        with st.spinner("Running test now..."):
-            code, output = run_agent_once_cli(
-                CONFIG_PATH,
-                test_mode=True,
-                test_minutes=test_minutes,
-            )
-        st.session_state.last_run_output = output
-        if code == 0:
-            st.success("Test run completed.")
-        else:
-            st.error("Test run failed. See output below.")
-
-    if run_full_submitted and not demo_mode and config_out is not None:
-        existing_pid = read_pid(FULLRUN_PID_PATH)
-        if existing_pid and is_pid_running(existing_pid):
-            st.info(f"Full run already running (PID {existing_pid}).")
-        else:
-            pid = start_background(
-                [
-                    sys.executable,
-                    "-m",
-                    "src.agent",
-                    "--config",
-                    str(CONFIG_PATH),
-                    "--once",
-                ],
-                FULLRUN_PID_PATH,
-                FULLRUN_LOG_PATH,
-            )
-            st.success(f"Full run started in background (PID {pid}).")
-            st.caption(f"Log: {FULLRUN_LOG_PATH}")
-
-    if stop_full_submitted and not demo_mode:
-        if stop_background(FULLRUN_PID_PATH):
-            st.success("Full run stopped.")
-        else:
-            st.info("No running full job found.")
-
-    if schedule_start_submitted and not demo_mode and config_out is not None:
-        existing_pid = read_pid(SCHEDULE_PID_PATH)
-        if existing_pid and is_pid_running(existing_pid):
-            st.info(f"Daily schedule already running (PID {existing_pid}).")
-        else:
-            pid = start_background(
-                [
-                    sys.executable,
-                    "-m",
-                    "src.agent",
-                    "--config",
-                    str(CONFIG_PATH),
-                ],
-                SCHEDULE_PID_PATH,
-                SCHEDULE_LOG_PATH,
-            )
-            st.success(f"Daily schedule started in background (PID {pid}).")
-            st.caption(f"Log: {SCHEDULE_LOG_PATH}")
-
-    if schedule_stop_submitted and not demo_mode:
-        if stop_background(SCHEDULE_PID_PATH):
-            st.success("Daily schedule stopped.")
-        else:
-            st.info("No running schedule found.")
-
+    # Show preview if available
     preview_path = st.session_state.get("preview_path")
     if preview_path and Path(preview_path).exists():
-        st.subheader("Thumbnail preview")
-        st.image(preview_path, use_column_width=True)
+        st.markdown("### Thumbnail Preview")
+        st.image(preview_path, use_container_width=True)
 
+    # Handle sidebar actions
+    if actions["run_test"]:
+        full_config = build_full_config(
+            audio_config, visuals_config, upload_config, settings_config, config
+        )
+        save_config(full_config)
+        test_minutes = int(settings_config.get("test_max_minutes", 10) or 10)
+        with st.spinner("Running test..."):
+            code, output = run_agent_once_cli(CONFIG_PATH, test_mode=True, test_minutes=test_minutes)
+        st.session_state.last_run_output = output
+        if code == 0:
+            st.success("Test completed")
+        else:
+            st.error("Test failed")
+
+    if actions["run_full"]:
+        full_config = build_full_config(
+            audio_config, visuals_config, upload_config, settings_config, config
+        )
+        save_config(full_config)
+        pid = start_background(
+            [sys.executable, "-m", "src.agent", "--config", str(CONFIG_PATH), "--once"],
+            FULLRUN_PID_PATH, FULLRUN_LOG_PATH,
+        )
+        st.success(f"Full run started (PID {pid})")
+
+    if actions["stop_full"]:
+        if stop_background(FULLRUN_PID_PATH):
+            st.success("Full run stopped")
+        else:
+            st.info("No running job found")
+
+    if actions["start_schedule"]:
+        full_config = build_full_config(
+            audio_config, visuals_config, upload_config, settings_config, config
+        )
+        save_config(full_config)
+        pid = start_background(
+            [sys.executable, "-m", "src.agent", "--config", str(CONFIG_PATH)],
+            SCHEDULE_PID_PATH, SCHEDULE_LOG_PATH,
+        )
+        st.success(f"Schedule started (PID {pid})")
+
+    if actions["stop_schedule"]:
+        if stop_background(SCHEDULE_PID_PATH):
+            st.success("Schedule stopped")
+        else:
+            st.info("No running schedule")
+
+    # Show run output
     run_output = st.session_state.get("last_run_output")
     if run_output:
-        st.subheader("Run output")
-        st.text_area("Latest run log", run_output, height=240)
-
-    st.divider()
-    st.subheader("Next steps")
-    st.write(
-        "1) Set WHISK_API_KEY and GROK_API_KEY in your environment (or use ffmpeg-only). "
-        "2) Use the Run buttons above or the scripts below."
-    )
-    st.code(
-        ".\\run-once.ps1\n"
-        ".\\run-test.ps1 -Minutes 10\n"
-        ".\\schedule-task.ps1\n"
-        ".\\schedule-task.ps1 -Remove",
-        language="powershell",
-    )
-    st.caption(f"Today: {dt.date.today().isoformat()}")
+        with st.expander("Run Output"):
+            st.code(run_output, language="text")
 
 
 if __name__ == "__main__":
