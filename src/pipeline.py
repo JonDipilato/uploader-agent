@@ -407,12 +407,22 @@ class VideoCreatorAgent:
         raise ValueError(f"Unsupported loop provider: {provider}")
 
     def _target_min_seconds(self) -> float:
+        # Check for minutes first (more granular control)
+        min_minutes = self._cfg("audio", "target_minutes_min", default=None)
+        if min_minutes is not None:
+            return float(min_minutes) * 60.0
+        # Fall back to hours
         min_hours = self._cfg("audio", "target_hours_min", default=8)
         if not min_hours:
             return 0.0
         return float(min_hours) * 3600.0
 
     def _target_max_seconds(self) -> float | None:
+        # Check for minutes first (more granular control)
+        max_minutes = self._cfg("audio", "target_minutes_max", default=None)
+        if max_minutes is not None:
+            return float(max_minutes) * 60.0
+        # Fall back to hours
         max_hours = self._cfg("audio", "target_hours_max", default=9)
         return float(max_hours) * 3600.0 if max_hours else None
 

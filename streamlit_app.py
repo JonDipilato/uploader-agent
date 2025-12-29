@@ -20,6 +20,12 @@ from src.utils.ffmpeg import (
     generate_color_image,
     render_image_with_text,
 )
+from src.providers.youtube_oauth import (
+    render_youtube_login,
+    credentials_configured,
+    save_token_to_file,
+    get_channel_info,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -854,9 +860,14 @@ def render_dashboard_tab(config: dict[str, Any]) -> None:
             folder_id = cfg(config, "audio", "drive_folder_id", "Not set")
             st.caption(f"Drive: `{folder_id[:20]}...`" if len(str(folder_id)) > 20 else f"Drive: `{folder_id}`")
 
-        hours_min = cfg(config, "audio", "target_hours_min", 8)
-        hours_max = cfg(config, "audio", "target_hours_max", 9)
-        st.caption(f"Duration: {hours_min}-{hours_max} hours")
+        minutes_min = cfg(config, "audio", "target_minutes_min", None)
+        minutes_max = cfg(config, "audio", "target_minutes_max", None)
+        if minutes_min is not None:
+            st.caption(f"Duration: {minutes_min}-{minutes_max} minutes")
+        else:
+            hours_min = cfg(config, "audio", "target_hours_min", 8)
+            hours_max = cfg(config, "audio", "target_hours_max", 9)
+            st.caption(f"Duration: {hours_min}-{hours_max} hours")
 
     with col2:
         st.markdown("**Visuals**")
@@ -958,21 +969,52 @@ def render_audio_tab(config: dict[str, Any]) -> dict[str, Any]:
             value=bool(cfg(config, "audio", "repeat_playlist", True)),
         )
 
+    # Duration mode selector
+    has_minutes_config = cfg(config, "audio", "target_minutes_min", None) is not None
+    duration_mode = st.radio(
+        "Duration unit",
+        ["Hours", "Minutes"],
+        index=1 if has_minutes_config else 0,
+        horizontal=True,
+        disabled=not audio_config["repeat_playlist"],
+    )
+
     col1, col2 = st.columns(2)
-    with col1:
-        audio_config["target_hours_min"] = st.number_input(
-            "Min hours",
-            min_value=0, max_value=24,
-            value=int(cfg(config, "audio", "target_hours_min", 8)),
-            disabled=not audio_config["repeat_playlist"],
-        )
-    with col2:
-        audio_config["target_hours_max"] = st.number_input(
-            "Max hours",
-            min_value=0, max_value=24,
-            value=int(cfg(config, "audio", "target_hours_max", 9)),
-            disabled=not audio_config["repeat_playlist"],
-        )
+    if duration_mode == "Hours":
+        with col1:
+            audio_config["target_hours_min"] = st.number_input(
+                "Min hours",
+                min_value=0.0, max_value=24.0, step=0.5,
+                value=float(cfg(config, "audio", "target_hours_min", 8)),
+                disabled=not audio_config["repeat_playlist"],
+            )
+        with col2:
+            audio_config["target_hours_max"] = st.number_input(
+                "Max hours",
+                min_value=0.0, max_value=24.0, step=0.5,
+                value=float(cfg(config, "audio", "target_hours_max", 9)),
+                disabled=not audio_config["repeat_playlist"],
+            )
+        audio_config["target_minutes_min"] = None
+        audio_config["target_minutes_max"] = None
+    else:
+        with col1:
+            audio_config["target_minutes_min"] = st.number_input(
+                "Min minutes",
+                min_value=0, max_value=1440,
+                value=int(cfg(config, "audio", "target_minutes_min", 10)),
+                disabled=not audio_config["repeat_playlist"],
+                help="For quick tests: 5-30 min. For shorts: 60 min."
+            )
+        with col2:
+            audio_config["target_minutes_max"] = st.number_input(
+                "Max minutes",
+                min_value=0, max_value=1440,
+                value=int(cfg(config, "audio", "target_minutes_max", 15)),
+                disabled=not audio_config["repeat_playlist"],
+            )
+        audio_config["target_hours_min"] = None
+        audio_config["target_hours_max"] = None
 
     with st.expander("Audio Quality"):
         col1, col2 = st.columns(2)
@@ -1296,19 +1338,40 @@ def render_upload_tab(config: dict[str, Any]) -> dict[str, Any]:
             ", ".join(cfg(config, "upload", "tags", ["ambient", "chill", "lofi"])),
         )
 
-        with st.expander("YouTube Credentials"):
-            upload["credentials_json"] = st.text_input(
-                "OAuth client JSON path",
-                cfg(config, "upload", "credentials_json", "secrets/youtube_client.json"),
-            )
-            upload["token_json"] = st.text_input(
-                "Token JSON path",
-                cfg(config, "upload", "token_json", "secrets/youtube_token.json"),
-            )
-            upload["upload_youtube_client"] = st.file_uploader(
-                "Upload OAuth client JSON",
-                type=["json"],
-            )
+        # YouTube Authentication
+        st.markdown("#### YouTube Account")
+
+        # Try new OAuth flow first
+        if credentials_configured():
+            token = render_youtube_login()
+            if token:
+                # Save token for CLI use
+                token_path = SECRETS_DIR / "youtube_token.json"
+                save_token_to_file(token, token_path)
+                upload["token_json"] = str(token_path)
+                upload["credentials_json"] = ""  # Not needed with OAuth flow
+                upload["youtube_authenticated"] = True
+            else:
+                upload["youtube_authenticated"] = False
+        else:
+            # Fallback to manual credentials
+            st.info("For easy login, configure OAuth in `.env` file. Or use manual setup below.")
+            with st.expander("Manual Credentials Setup"):
+                upload["credentials_json"] = st.text_input(
+                    "OAuth client JSON path",
+                    cfg(config, "upload", "credentials_json", "secrets/youtube_client.json"),
+                )
+                upload["token_json"] = st.text_input(
+                    "Token JSON path",
+                    cfg(config, "upload", "token_json", "secrets/youtube_token.json"),
+                )
+                upload["upload_youtube_client"] = st.file_uploader(
+                    "Upload OAuth client JSON",
+                    type=["json"],
+                )
+            upload["youtube_authenticated"] = Path(
+                cfg(config, "upload", "token_json", "secrets/youtube_token.json")
+            ).exists()
 
     st.markdown("---")
 
@@ -1488,8 +1551,10 @@ def build_full_config(
             "ordering": audio.get("ordering", "name"),
             "repeat_playlist": audio.get("repeat_playlist", True),
             "recursive": audio.get("recursive", False),
-            "target_hours_min": int(audio.get("target_hours_min", 8)),
-            "target_hours_max": int(audio.get("target_hours_max", 9)),
+            "target_hours_min": float(audio["target_hours_min"]) if audio.get("target_hours_min") else None,
+            "target_hours_max": float(audio["target_hours_max"]) if audio.get("target_hours_max") else None,
+            "target_minutes_min": int(audio["target_minutes_min"]) if audio.get("target_minutes_min") else None,
+            "target_minutes_max": int(audio["target_minutes_max"]) if audio.get("target_minutes_max") else None,
             "concat_codec": "libmp3lame",
             "concat_quality": int(audio.get("concat_quality", 2)),
             "concat_bitrate": audio.get("concat_bitrate") or None,

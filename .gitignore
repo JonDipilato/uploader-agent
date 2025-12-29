@@ -6,10 +6,11 @@ runs/
 *.log
 assets/
 .streamlit.log
-.streamlit/
+.streamlit/secrets.toml
 config.test.yaml
 config.grok_test.yaml
 .serena/
 CLAUDE.md
 *.code-workspace
 config.yaml
+.env

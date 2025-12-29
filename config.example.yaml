@@ -9,8 +9,13 @@ audio:
   ordering: "name"
   repeat_playlist: true
   recursive: false
+  # Duration: Use EITHER hours OR minutes (minutes takes priority)
+  # For long-form videos (8-9 hours):
   target_hours_min: 8
   target_hours_max: 9
+  # For short tests or clips (uncomment to use minutes instead):
+  # target_minutes_min: 10
+  # target_minutes_max: 15
   concat_codec: "libmp3lame"
   concat_quality: 2
   concat_bitrate: null
