@@ -12,3 +12,4 @@ config.grok_test.yaml
 .serena/
 CLAUDE.md
 *.code-workspace
+config.yaml

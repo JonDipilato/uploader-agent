@@ -673,6 +673,20 @@ def safe_float(value: Any, default: float) -> float:
     return default
 
 
+def default_fontfile() -> Path | None:
+    if os.name != "nt":
+        return None
+    candidates = [
+        Path("C:/Windows/Fonts/arial.ttf"),
+        Path("C:/Windows/Fonts/segoeui.ttf"),
+        Path("C:/Windows/Fonts/calibri.ttf"),
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
 def apply_preset(config: dict[str, Any], preset: dict[str, dict[str, Any]]) -> dict[str, Any]:
     for section, values in preset.items():
         section_map = config.setdefault(section, {})
@@ -1209,6 +1223,19 @@ def render_visuals_tab(config: dict[str, Any]) -> dict[str, Any]:
                 "Outline color",
                 cfg(config, "text_overlay", "outline_color", "black"),
             )
+        visuals["outline_width"] = st.number_input(
+            "Outline width",
+            min_value=0, max_value=20,
+            value=int(cfg(config, "text_overlay", "outline_width", 4)),
+        )
+        visuals["fontfile"] = st.text_input(
+            "Font file path (optional)",
+            cfg(config, "text_overlay", "fontfile", "") or "",
+        )
+        visuals["upload_font"] = st.file_uploader(
+            "Or upload font file (TTF/OTF)",
+            type=["ttf", "otf"],
+        )
 
         position_options = {
             "center": ("(w-text_w)/2", "(h-text_h)/2"),
@@ -1424,6 +1451,14 @@ def build_full_config(
     if visuals.get("upload_loop"):
         saved_loop_path = save_uploaded_file(visuals["upload_loop"], ASSETS_DIR / "loop.mp4")
 
+    saved_font_path = visuals.get("fontfile", "") or ""
+    if visuals.get("upload_font"):
+        suffix = Path(visuals["upload_font"].name).suffix or ".ttf"
+        saved_font_path = save_uploaded_file(
+            visuals["upload_font"],
+            ASSETS_DIR / f"overlay_font{suffix}",
+        )
+
     saved_audio_folder = audio.get("local_folder", "")
     if audio.get("source") == "local" and audio.get("uploaded_files"):
         timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1498,7 +1533,8 @@ def build_full_config(
             "font_size": int(visuals.get("font_size", 96)),
             "font_color": visuals.get("font_color", "white"),
             "outline_color": visuals.get("outline_color", "black"),
-            "outline_width": 4,
+            "outline_width": int(visuals.get("outline_width", 4)),
+            "fontfile": saved_font_path or None,
             "x": visuals.get("overlay_x", "(w-text_w)/2"),
             "y": visuals.get("overlay_y", "(h-text_h)/2"),
             "apply_to_video": visuals.get("overlay_apply_to_video", True),
@@ -1652,16 +1688,30 @@ def main() -> None:
                         resolution=upload_config.get("resolution", "1920x1080"),
                         color=visuals_config.get("background_color", "black"),
                     )
+                if not preview_image_path:
+                    st.warning("Preview needs an image path, upload, or auto background.")
+                else:
+                    font_path = None
+                    if visuals_config.get("upload_font"):
+                        suffix = Path(visuals_config["upload_font"].name).suffix or ".ttf"
+                        font_path = preview_dir / f"preview_font{suffix}"
+                        font_path.write_bytes(visuals_config["upload_font"].getvalue())
+                    elif visuals_config.get("fontfile"):
+                        resolved_font = resolve_path(visuals_config["fontfile"])
+                        if resolved_font.exists():
+                            font_path = resolved_font
+                    if font_path is None:
+                        font_path = default_fontfile()
 
-                if preview_image_path:
                     drawtext_filter = build_drawtext_filter(
                         textfile=preview_text_path,
+                        fontfile=font_path,
                         font_size=int(visuals_config.get("font_size", 96)),
                         font_color=visuals_config.get("font_color", "white"),
                         x=visuals_config.get("overlay_x", "(w-text_w)/2"),
                         y=visuals_config.get("overlay_y", "(h-text_h)/2"),
                         border_color=visuals_config.get("outline_color", "black"),
-                        border_width=4,
+                        border_width=int(visuals_config.get("outline_width", 4)),
                     )
                     preview_output = preview_dir / "thumbnail_preview.png"
                     try:
