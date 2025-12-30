@@ -990,10 +990,14 @@ def render_audio_tab(config: dict[str, Any]) -> dict[str, Any]:
 
     col1, col2 = st.columns(2)
     with col1:
+        ordering_options = ["name", "modifiedTime", "random"]
+        current_ordering = cfg(config, "audio", "ordering", "name")
+        ordering_index = ordering_options.index(current_ordering) if current_ordering in ordering_options else 0
         audio_config["ordering"] = st.selectbox(
             "Ordering",
-            ["name", "modifiedTime"],
-            index=0 if cfg(config, "audio", "ordering", "name") == "name" else 1,
+            ordering_options,
+            index=ordering_index,
+            help="name = alphabetical, modifiedTime = newest first, random = shuffled"
         )
     with col2:
         audio_config["repeat_playlist"] = st.checkbox(
@@ -1297,11 +1301,20 @@ def render_visuals_tab(config: dict[str, Any]) -> dict[str, Any]:
                 "Outline color",
                 cfg(config, "text_overlay", "outline_color", "black"),
             )
-        visuals["outline_width"] = st.number_input(
-            "Outline width",
-            min_value=0, max_value=20,
-            value=int(cfg(config, "text_overlay", "outline_width", 4)),
-        )
+        col1, col2 = st.columns(2)
+        with col1:
+            visuals["outline_width"] = st.number_input(
+                "Outline width",
+                min_value=0, max_value=20,
+                value=int(cfg(config, "text_overlay", "outline_width", 4)),
+            )
+        with col2:
+            visuals["letter_spacing"] = st.number_input(
+                "Letter spacing",
+                min_value=0, max_value=50,
+                value=int(cfg(config, "text_overlay", "letter_spacing", 0)),
+                help="Extra spaces between characters (0 = normal)"
+            )
         visuals["fontfile"] = st.text_input(
             "Font file path (optional)",
             cfg(config, "text_overlay", "fontfile", "") or "",
@@ -1628,6 +1641,7 @@ def build_full_config(
             "font_color": visuals.get("font_color", "white"),
             "outline_color": visuals.get("outline_color", "black"),
             "outline_width": int(visuals.get("outline_width", 4)),
+            "letter_spacing": int(visuals.get("letter_spacing", 0)),
             "fontfile": saved_font_path or None,
             "x": visuals.get("overlay_x", "(w-text_w)/2"),
             "y": visuals.get("overlay_y", "(h-text_h)/2"),
@@ -1763,7 +1777,14 @@ def main() -> None:
                 preview_dir = ROOT / "runs" / "_preview"
                 preview_dir.mkdir(parents=True, exist_ok=True)
                 preview_text_path = preview_dir / "preview_overlay.txt"
-                preview_text_path.write_text(selected_text, encoding="utf-8")
+                # Apply letter spacing if configured
+                letter_spacing = int(visuals_config.get("letter_spacing", 0))
+                display_text = selected_text
+                if letter_spacing > 0:
+                    spacer = " " * letter_spacing
+                    lines = selected_text.split("\n")
+                    display_text = "\n".join(spacer.join(list(line)) for line in lines)
+                preview_text_path.write_text(display_text, encoding="utf-8")
 
                 # Determine preview image
                 preview_image_path = None

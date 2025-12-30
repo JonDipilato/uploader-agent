@@ -6,7 +6,7 @@ audio:
   source: "drive"
   drive_folder_id: "YOUR_DRIVE_FOLDER_ID"
   local_folder: null
-  ordering: "name"
+  ordering: "name"  # Options: name, modifiedTime, random
   repeat_playlist: true
   recursive: false
   # Duration: Use EITHER hours OR minutes (minutes takes priority)
@@ -98,6 +98,7 @@ text_overlay:
   font_color: "white"
   outline_color: "black"
   outline_width: 4
+  letter_spacing: 0  # Extra spaces between characters (0 = normal)
   box_color: null
   box_borderw: null
   shadow_color: null

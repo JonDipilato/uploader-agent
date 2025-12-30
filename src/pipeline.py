@@ -243,12 +243,15 @@ class VideoCreatorAgent:
         )
 
     def _list_local_audio_files(self, folder: Path, ordering: str) -> list[Path]:
+        import random
         if not folder.exists():
             raise RuntimeError(f"Audio folder not found: {folder}")
         recursive = bool(self._cfg("audio", "recursive", default=False))
         candidates = folder.rglob("*") if recursive else folder.iterdir()
         files = [path for path in candidates if path.is_file() and path.suffix.lower() == ".mp3"]
-        if ordering == "modifiedTime":
+        if ordering == "random":
+            random.shuffle(files)
+        elif ordering == "modifiedTime":
             files.sort(key=lambda path: path.stat().st_mtime)
         else:
             files.sort(key=lambda path: path.name.lower())
@@ -455,6 +458,10 @@ class VideoCreatorAgent:
         text = overlay_text if overlay_text is not None else self._resolve_overlay_text()
         if not text:
             return None
+        # Apply letter spacing if configured
+        letter_spacing = int(overlay_cfg.get("letter_spacing", 0))
+        if letter_spacing > 0:
+            text = self._apply_letter_spacing(text, letter_spacing)
         textfile = run_dir / "overlay.txt"
         textfile.write_text(text, encoding="utf-8")
         return {
@@ -502,6 +509,26 @@ class VideoCreatorAgent:
                     idx = dt.date.today().toordinal() % len(auto_texts)
                     text = auto_texts[idx]
         return str(text).strip()
+
+    def _apply_letter_spacing(self, text: str, spacing: int) -> str:
+        """Add spaces between characters for letter spacing effect.
+
+        Args:
+            text: The original text
+            spacing: Number of spaces to insert between each character
+
+        Returns:
+            Text with spacing applied (preserves newlines)
+        """
+        if spacing <= 0:
+            return text
+        spacer = " " * spacing
+        lines = text.split("\n")
+        spaced_lines = []
+        for line in lines:
+            # Insert spaces between each character in the line
+            spaced_lines.append(spacer.join(list(line)))
+        return "\n".join(spaced_lines)
 
     def _render_prompt_template(self, template: str, overlay_text: str | None) -> str:
         class _SafeDict(dict):

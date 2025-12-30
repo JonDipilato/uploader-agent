@@ -60,8 +60,9 @@ class DriveClient:
         return build("drive", "v3", credentials=creds)
 
     def list_mp3_files(self, ordering: str = "name") -> list[dict]:
-        if ordering not in {"name", "modifiedTime"}:
-            ordering = "name"
+        import random
+        # Drive API doesn't support random ordering, so we'll shuffle after fetching
+        api_ordering = ordering if ordering in {"name", "modifiedTime"} else "name"
         query = (
             f"'{self.config.folder_id}' in parents "
             "and mimeType='audio/mpeg' "
@@ -75,7 +76,7 @@ class DriveClient:
                 .list(
                     q=query,
                     fields="nextPageToken, files(id, name, size, modifiedTime)",
-                    orderBy=ordering,
+                    orderBy=api_ordering,
                     pageToken=page_token,
                 )
                 .execute()
@@ -84,6 +85,9 @@ class DriveClient:
             page_token = response.get("nextPageToken")
             if not page_token:
                 break
+        # Shuffle if random ordering requested
+        if ordering == "random":
+            random.shuffle(files)
         return files
 
     def download_file(self, file_id: str, dest_path: Path) -> None:

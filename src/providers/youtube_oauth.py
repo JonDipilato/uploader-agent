@@ -234,6 +234,7 @@ def render_youtube_login(redirect_uri: str | None = None) -> dict[str, Any] | No
             extras_params={"access_type": "offline", "prompt": "consent"},
             use_container_width=True,
             icon="https://www.google.com/favicon.ico",
+            key="youtube_oauth_login",
         )
 
         if result and "token" in result:
