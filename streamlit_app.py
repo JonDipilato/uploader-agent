@@ -740,6 +740,7 @@ def render_sidebar(config: dict[str, Any], demo_mode: bool) -> dict[str, bool]:
     actions = {
         "run_test": False,
         "run_full": False,
+        "run_preview": False,
         "stop_full": False,
         "start_schedule": False,
         "stop_schedule": False,
@@ -776,18 +777,22 @@ def render_sidebar(config: dict[str, Any], demo_mode: bool) -> dict[str, bool]:
     # Quick actions
     st.sidebar.markdown("### Quick Actions")
 
-    col1, col2 = st.sidebar.columns(2)
+    col1, col2, col3 = st.sidebar.columns(3)
 
     with col1:
-        if st.button("Test Run", disabled=demo_mode, use_container_width=True, key="sidebar_test"):
-            actions["run_test"] = True
+        if st.button("Preview", disabled=demo_mode, use_container_width=True, key="sidebar_preview", help="30-sec sample"):
+            actions["run_preview"] = True
 
     with col2:
+        if st.button("Test", disabled=demo_mode, use_container_width=True, key="sidebar_test", help="10-min test"):
+            actions["run_test"] = True
+
+    with col3:
         if full_running:
             if st.button("Stop", disabled=demo_mode, use_container_width=True, key="sidebar_stop_full"):
                 actions["stop_full"] = True
         else:
-            if st.button("Full Run", disabled=demo_mode, use_container_width=True, key="sidebar_full"):
+            if st.button("Full", disabled=demo_mode, use_container_width=True, key="sidebar_full", help="Full render"):
                 actions["run_full"] = True
 
     # Schedule control
@@ -809,6 +814,33 @@ def render_sidebar(config: dict[str, Any], demo_mode: bool) -> dict[str, bool]:
     )
     if demo_mode:
         st.sidebar.info("Saving is disabled")
+
+    st.sidebar.markdown("---")
+
+    # YouTube Account Status
+    st.sidebar.markdown("### YouTube Account")
+    if credentials_configured():
+        if "youtube_token" in st.session_state and st.session_state.youtube_token:
+            channel = get_channel_info(st.session_state.youtube_token)
+            if channel:
+                st.sidebar.success(f"**{channel['title']}**")
+                if st.sidebar.button("Logout", key="sidebar_yt_logout", use_container_width=True):
+                    st.session_state.youtube_token = None
+                    st.rerun()
+            else:
+                st.sidebar.warning("Session expired")
+                token = render_youtube_login()
+        else:
+            token = render_youtube_login()
+            if token:
+                st.rerun()
+    else:
+        st.sidebar.info("Configure OAuth in Settings")
+        with st.sidebar.expander("Quick Setup"):
+            st.markdown("""
+            1. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in Streamlit secrets
+            2. Add your app URL as redirect URI in Google Cloud Console
+            """)
 
     st.sidebar.markdown("---")
     st.sidebar.caption(f"Today: {dt.date.today().isoformat()}")
@@ -1354,24 +1386,21 @@ def render_upload_tab(config: dict[str, Any]) -> dict[str, Any]:
             else:
                 upload["youtube_authenticated"] = False
         else:
-            # Fallback to manual credentials
-            st.info("For easy login, configure OAuth in `.env` file. Or use manual setup below.")
-            with st.expander("Manual Credentials Setup"):
-                upload["credentials_json"] = st.text_input(
-                    "OAuth client JSON path",
-                    cfg(config, "upload", "credentials_json", "secrets/youtube_client.json"),
-                )
-                upload["token_json"] = st.text_input(
-                    "Token JSON path",
-                    cfg(config, "upload", "token_json", "secrets/youtube_token.json"),
-                )
-                upload["upload_youtube_client"] = st.file_uploader(
-                    "Upload OAuth client JSON",
-                    type=["json"],
-                )
-            upload["youtube_authenticated"] = Path(
-                cfg(config, "upload", "token_json", "secrets/youtube_token.json")
-            ).exists()
+            # OAuth not configured - show setup instructions
+            st.warning("YouTube login not configured.")
+            with st.expander("Setup Instructions"):
+                st.markdown("""
+                **For App Owners:**
+                1. Go to [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
+                2. Create an OAuth 2.0 Client ID (Web application)
+                3. Add your app URL as authorized redirect URI
+                4. Add credentials to Streamlit secrets or `.env` file:
+                   - `GOOGLE_CLIENT_ID`
+                   - `GOOGLE_CLIENT_SECRET`
+                """)
+            upload["youtube_authenticated"] = False
+            upload["credentials_json"] = ""
+            upload["token_json"] = ""
 
     st.markdown("---")
 
@@ -1793,6 +1822,27 @@ def main() -> None:
         st.image(preview_path, use_container_width=True)
 
     # Handle sidebar actions
+    if actions["run_preview"]:
+        full_config = build_full_config(
+            audio_config, visuals_config, upload_config, settings_config, config
+        )
+        save_config(full_config)
+        with st.spinner("Generating 30-second preview..."):
+            # Run with 0.5 minutes (30 seconds) for quick preview
+            code, output = run_agent_once_cli(CONFIG_PATH, test_mode=True, test_minutes=1)
+        st.session_state.last_run_output = output
+        if code == 0:
+            # Try to find the output video
+            preview_dir = RUNS_UI_DIR
+            videos = sorted(preview_dir.glob("**/*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if videos:
+                st.success("Preview ready!")
+                st.video(str(videos[0]))
+            else:
+                st.success("Preview completed - check runs folder")
+        else:
+            st.error("Preview failed")
+
     if actions["run_test"]:
         full_config = build_full_config(
             audio_config, visuals_config, upload_config, settings_config, config
