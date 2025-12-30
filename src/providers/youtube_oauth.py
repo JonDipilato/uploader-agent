@@ -126,7 +126,7 @@ def get_redirect_uri() -> str:
     """
     import streamlit as st
 
-    # Check for custom redirect URI in secrets/env
+    # Check for custom redirect URI in secrets/env (highest priority)
     custom_uri = os.getenv("OAUTH_REDIRECT_URI")
     if custom_uri:
         return custom_uri
@@ -137,25 +137,17 @@ def get_redirect_uri() -> str:
     except Exception:
         pass
 
-    # Try to detect Streamlit Cloud
-    # Streamlit Cloud sets specific environment variables
-    if os.getenv("STREAMLIT_SHARING_MODE") or os.getenv("IS_STREAMLIT_CLOUD"):
-        # Running on Streamlit Cloud - need the app URL from secrets
-        try:
-            if hasattr(st, "secrets") and "APP_URL" in st.secrets:
-                return st.secrets["APP_URL"]
-        except Exception:
-            pass
-
-    # Check if we have query params that indicate the host
+    # Check for APP_URL in secrets (for Streamlit Cloud deployment)
     try:
-        # In newer Streamlit versions
-        query_params = st.query_params
-        if query_params:
-            # We're probably on a deployed instance
-            pass
+        if hasattr(st, "secrets") and "APP_URL" in st.secrets:
+            return st.secrets["APP_URL"]
     except Exception:
         pass
+
+    # Check environment variable for APP_URL
+    app_url = os.getenv("APP_URL")
+    if app_url:
+        return app_url
 
     # Default to localhost for development
     return "http://localhost:8501"
