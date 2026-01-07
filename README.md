@@ -1,5 +1,7 @@
 # Video Creator Agent (ffmpeg + Drive + YouTube)
 
+> **👋 New here? Just want to create videos?** See **[START_HERE.md](START_HERE.md)** for the simple beginner guide!
+
 Automates an 8-9 hour looped visual + audio video:
 - Downloads MP3s from a Google Drive folder.
 - Repeats the playlist until it reaches the target length.

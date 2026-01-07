@@ -1462,6 +1462,223 @@ def render_upload_tab(config: dict[str, Any]) -> dict[str, Any]:
     return upload
 
 
+def render_simple_tab(config: dict[str, Any]) -> dict[str, Any]:
+    """Render the simplified beginner-friendly tab"""
+    simple = {}
+
+    # Help button at top
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        if st.button("❓ Need Help? Click Here", use_container_width=True, key="simple_help"):
+            st.session_state["show_help"] = not st.session_state.get("show_help", False)
+
+    if st.session_state.get("show_help"):
+        st.info("""
+        **Quick Setup Guide**
+
+        **First Time?** Follow these steps:
+
+        1. **Install Python** - Get it from Microsoft Store (search "Python 3.11" or "3.12")
+
+        2. **Run Setup** - Double-click `First Time Setup.bat`
+
+        3. **Set Up YouTube** (one-time, ~5 min):
+           - Go to https://console.cloud.google.com/apis/credentials
+           - Create a new project
+           - Enable "YouTube Data API v3"
+           - Create OAuth 2.0 Client ID (Web application)
+           - Add `http://localhost:8501` as redirect URI
+           - Create file `.streamlit/secrets.toml` with your keys
+
+        See `START_HERE.md` for full step-by-step instructions!
+
+        **Every Day:**
+        1. Double-click `Start App.bat`
+        2. Sign in to YouTube (first time only)
+        3. Pick your music folder
+        4. Type your text
+        5. Click Generate!
+        """)
+
+    st.markdown("---")
+    st.markdown("### 🎬 Create Your Video")
+    st.caption("Just fill in these 3 things and click Generate!")
+
+    # Check FFmpeg
+    ffmpeg_available = True
+    try:
+        subprocess.run(["ffmpeg", "-version"], capture_output=True, check=False)
+    except FileNotFoundError:
+        ffmpeg_available = False
+
+    if not ffmpeg_available:
+        st.error("""
+        **FFmpeg not found!**
+
+        Please install FFmpeg first:
+        1. Open Terminal or Command Prompt
+        2. Run: `winget install Gyan.FFmpeg`
+        3. Restart this app
+
+        Or download from: https://ffmpeg.org/download.html
+        """)
+
+    # YouTube Sign-in Section
+    st.markdown("---")
+    st.markdown("### 1️⃣ YouTube Account")
+
+    if credentials_configured():
+        if "youtube_token" in st.session_state and st.session_state.youtube_token:
+            channel = get_channel_info(st.session_state.youtube_token)
+            if channel:
+                st.success(f"✅ Signed in as **{channel['title']}**")
+                if st.button("Sign Out", key="simple_yt_logout", use_container_width=True):
+                    st.session_state.youtube_token = None
+                    st.rerun()
+            else:
+                st.warning("Session expired - please sign in again")
+                token = render_youtube_login()
+                if token:
+                    st.rerun()
+        else:
+            with st.container():
+                st.info("Click below to sign in to YouTube")
+                token = render_youtube_login()
+                if token:
+                    st.rerun()
+    else:
+        st.error("❌ YouTube login not configured")
+        with st.expander("🔧 Setup Instructions (one-time setup)"):
+            st.markdown("""
+            **You need to set up YouTube upload for your channel.** This takes ~5 minutes.
+
+            **Step 1 - Create Google Cloud Project:**
+            1. Go to https://console.cloud.google.com/apis/credentials
+            2. Click the project dropdown → "NEW PROJECT" → name it → "CREATE"
+            3. Wait 30 seconds, then select your new project
+
+            **Step 2 - Enable YouTube API:**
+            1. Left menu: "APIs & Services" → "Library"
+            2. Search "YouTube Data API v3" and click "ENABLE"
+
+            **Step 3 - Create OAuth Credentials:**
+            1. Go to "APIs & Services" → "Credentials"
+            2. Click "+ CREATE CREDENTIALS" → "OAuth 2.0 Client ID"
+            3. If asked: Choose "External", click "Create" and "Save and Continue" through all steps
+            4. Select "Web application"
+            5. Name: anything you want
+            6. Authorized redirect URIs: ADD `http://localhost:8501`
+            7. Click "Create" and copy your Client ID and Secret
+
+            **Step 4 - Add to App:**
+            1. Create a folder named `.streamlit` (the dot is important)
+            2. Inside it, create a file named `secrets.toml`
+            3. Paste:
+               ```toml
+               GOOGLE_CLIENT_ID = "your-client-id-here"
+               GOOGLE_CLIENT_SECRET = "your-secret-here"
+               ```
+
+            4. Save and restart this app
+            """)
+
+    # Audio Folder Section
+    st.markdown("---")
+    st.markdown("### 2️⃣ Music Folder")
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        simple["local_folder"] = st.text_input(
+            "Folder with your MP3 files",
+            cfg(config, "audio", "local_folder", ""),
+            placeholder="C:\\Users\\YourName\\Music or /home/username/music",
+            key="simple_audio_folder"
+        )
+    with col2:
+        simple["recursive"] = st.checkbox(
+            "Include subfolders",
+            value=bool(cfg(config, "audio", "recursive", True)),
+            key="simple_recursive"
+        )
+
+    # Text Overlay Section
+    st.markdown("---")
+    st.markdown("### 3️⃣ Text on Video")
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        simple["overlay_text"] = st.text_input(
+            "Text to display",
+            cfg(config, "text_overlay", "text", "LOCK IN"),
+            placeholder="e.g., FOCUS, RELAX, STUDY",
+            key="simple_overlay_text"
+        )
+    with col2:
+        simple["auto_mode"] = st.selectbox(
+            "Mode",
+            ["fixed", "daily", "random"],
+            index=0,
+            help="fixed = always use this text, daily = rotates daily, random = random each time",
+            key="simple_auto_mode"
+        )
+
+    # Auto texts for rotation
+    if simple["auto_mode"] in ["daily", "random"]:
+        simple["auto_texts"] = st.text_area(
+            "Texts to rotate through (one per line)",
+            "\n".join(cfg(config, "text_overlay", "auto_texts", ["LOCK IN", "FOCUS", "RELAX"])),
+            height=80,
+            key="simple_auto_texts"
+        )
+    else:
+        simple["auto_texts"] = []
+
+    # Duration Section
+    st.markdown("---")
+    st.markdown("### 4️⃣ Video Length")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        simple["duration_hours"] = st.selectbox(
+            "How long?",
+            [8, 9],
+            index=0,
+            key="simple_duration"
+        )
+    with col2:
+        simple["privacy"] = st.selectbox(
+            "Privacy",
+            ["public", "unlisted", "private"],
+            index=0,
+            help="public = anyone can see, unlisted = only with link, private = only you",
+            key="simple_privacy"
+        )
+
+    # Generate Button
+    st.markdown("---")
+    st.markdown("### 🚀 Generate")
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        generate_clicked = st.button(
+            "**GENERATE VIDEO**",
+            disabled=not ffmpeg_available,
+            use_container_width=True,
+            type="primary",
+            key="simple_generate"
+        )
+
+    simple["generate_clicked"] = generate_clicked
+
+    # Progress section
+    if generate_clicked:
+        st.markdown("---")
+        st.markdown("### ⏳ Generating Video...")
+        st.info("This will take 30-60 minutes. You can close this page - it will keep running in the background.")
+
+    return simple
+
+
 def render_settings_tab(config: dict[str, Any]) -> dict[str, Any]:
     """Render settings/schedule tab"""
     settings = {}
@@ -1720,7 +1937,8 @@ def main() -> None:
     st.caption("Automated pipeline for generating looped visual + audio videos")
 
     # Main tabs
-    tab_dashboard, tab_audio, tab_visuals, tab_upload, tab_settings = st.tabs([
+    tab_simple, tab_dashboard, tab_audio, tab_visuals, tab_upload, tab_settings = st.tabs([
+        " Simple",
         " Dashboard",
         " Audio",
         " Visuals",
@@ -1732,6 +1950,10 @@ def main() -> None:
     visuals_config = {}
     upload_config = {}
     settings_config = {}
+    simple_config = {}
+
+    with tab_simple:
+        simple_config = render_simple_tab(config)
 
     with tab_dashboard:
         render_dashboard_tab(config)
@@ -1911,6 +2133,102 @@ def main() -> None:
             st.success("Schedule stopped")
         else:
             st.info("No running schedule")
+
+    # Handle Simple Mode Generate button
+    if simple_config.get("generate_clicked"):
+        # Build minimal config from simple mode
+        duration_hours = simple_config.get("duration_hours", 8)
+
+        simple_full_config = {
+            "project": {
+                "name": "daily_chill_mix",
+                "output_dir": "runs",
+            },
+            "audio": {
+                "source": "local",
+                "local_folder": simple_config.get("local_folder", ""),
+                "ordering": "random",
+                "repeat_playlist": True,
+                "recursive": simple_config.get("recursive", True),
+                "target_hours_min": float(duration_hours),
+                "target_hours_max": float(duration_hours) + 1,
+                "target_minutes_min": None,
+                "target_minutes_max": None,
+                "concat_codec": "libmp3lame",
+                "concat_quality": 2,
+            },
+            "visuals": {
+                "image_provider": "openai",
+                "image_prompt": "cozy coffee shop interior, warm light, cinematic, empty center space for text",
+                "loop_provider": "ffmpeg",
+                "loop_duration_seconds": 5,
+                "fps": 30,
+                "loop_motion_style": "cinematic",
+                "loop_zoom_amount": 0.02,
+                "loop_pan_amount": 0.1,
+                "loop_effects": ["flicker", "vignette"],
+                "loop_flicker_amount": 0.015,
+                "loop_vignette_angle": 0.63,
+            },
+            "text_overlay": {
+                "text": simple_config.get("overlay_text", "LOCK IN") if simple_config.get("auto_mode") == "fixed" else None,
+                "auto_texts": split_text_lines(simple_config.get("auto_texts", "")),
+                "auto_mode": simple_config.get("auto_mode", "fixed"),
+                "font_size": 96,
+                "font_color": "white",
+                "outline_color": "black",
+                "outline_width": 4,
+                "letter_spacing": 0,
+                "x": "(w-text_w)/2",
+                "y": "(h-text_h)/2",
+                "apply_to_video": True,
+                "create_thumbnail": True,
+                "upload_thumbnail": True,
+            },
+            "video": {
+                "resolution": "1920x1080",
+                "fps": 30,
+                "video_bitrate": "4500k",
+                "audio_bitrate": "192k",
+            },
+            "upload": {
+                "enabled": True,
+                "provider": "youtube",
+                "privacy_status": simple_config.get("privacy", "public"),
+                "category_id": "10",
+                "title_template": f"Chill Mix - {{{{date}}}}",
+                "description_template": "Relaxing mix for focus, study, or sleep.",
+                "tags": ["chill", "ambient", "focus", "study music", "relax"],
+            },
+            "tracklist": {
+                "enabled": True,
+                "filename": "tracklist.txt",
+                "append_to_description": True,
+                "embed_chapters": True,
+            },
+            "test": {
+                "enabled": False,
+            },
+            "schedule": {
+                "enabled": False,
+            },
+        }
+
+        # Use existing YouTube token if available
+        if st.session_state.get("youtube_token"):
+            token_path = SECRETS_DIR / "youtube_token.json"
+            save_token_to_file(st.session_state.youtube_token, token_path)
+            simple_full_config["upload"]["token_json"] = str(token_path)
+
+        save_config(simple_full_config)
+        st.session_state.config = simple_full_config
+
+        pid = start_background(
+            [sys.executable, "-m", "src.agent", "--config", str(CONFIG_PATH), "--once"],
+            FULLRUN_PID_PATH, FULLRUN_LOG_PATH,
+        )
+        st.success(f"Video generation started! (PID {pid})")
+        st.info("This will take 30-60 minutes. You can close this tab and come back later.")
 
     # Show run output
     run_output = st.session_state.get("last_run_output")
